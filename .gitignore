@@ -1,0 +1,29 @@
+# Secrets and credentials
+.env
+auth.json
+
+# Downloaded files
+*.pdf
+downloads/
+
+# Logs
+*.log
+automation.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
