@@ -194,7 +194,7 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
     summary_arr = f"{len(arrivals_data)} checking in"
     summary_dep = f"{len(departures_data)} checking out"
     
-    subject = f"Cleaning Reports {date_str}: {summary_arr}, {summary_dep}"
+    subject = f"Paradise Cleaning {date_str}: {summary_arr}, {summary_dep}"
     
     body = f"""Hi,
 
