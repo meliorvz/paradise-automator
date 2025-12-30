@@ -92,6 +92,7 @@ def run_daily_report():
         page.wait_for_timeout(2000)
         
         # Select Tomorrow in the popup
+        logger.info("Selecting 'Tomorrow' for reports...")
         page.click("text=Tomorrow")
         page.wait_for_timeout(1000)
         
@@ -129,15 +130,34 @@ def run_daily_report():
             # Try specific ID as fallback
             report_page.click("li#trv-main-menu-export-command > a", force=True)
 
-        # Click PDF option
+        # Download PDF
         with report_page.expect_download() as download_info:
             report_page.wait_for_timeout(500)
             report_page.click("text=Acrobat (PDF) file")
-        
         download = download_info.value
-        arrivals_path = str(DOWNLOAD_DIR / f"arrivals_{datetime.now().strftime('%Y%m%d')}.pdf")
-        download.save_as(arrivals_path)
-        logger.info(f"✓ Saved Arrival Report: {arrivals_path}")
+        arrivals_pdf = str(DOWNLOAD_DIR / f"arrivals_{datetime.now().strftime('%Y%m%d')}.pdf")
+        download.save_as(arrivals_pdf)
+        logger.info(f"✓ Saved Arrival Report (PDF): {arrivals_pdf}")
+        
+        # Re-click export for CSV
+        report_page.wait_for_timeout(1000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            for i in range(export_btns.count()):
+                if export_btns.nth(i).is_visible():
+                    export_btns.nth(i).click()
+                    break
+        except:
+            report_page.click("[title='Export']", force=True)
+        
+        # Download CSV
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=CSV (comma delimited)")
+        download = download_info.value
+        arrivals_csv = str(DOWNLOAD_DIR / f"arrivals_{datetime.now().strftime('%Y%m%d')}.csv")
+        download.save_as(arrivals_csv)
+        logger.info(f"✓ Saved Arrival Report (CSV): {arrivals_csv}")
         
         # Close the report tab
         report_page.close()
@@ -187,31 +207,60 @@ def run_daily_report():
                 
         except Exception as e:
             logger.error(f"Error clicking export button: {e}")
-            # Try specific ID as fallback
             report_page.click("li#trv-main-menu-export-command > a", force=True)
 
+        # Download PDF
         with report_page.expect_download() as download_info:
             report_page.wait_for_timeout(500)
             report_page.click("text=Acrobat (PDF) file")
-        
         download = download_info.value
-        departures_path = str(DOWNLOAD_DIR / f"departures_{datetime.now().strftime('%Y%m%d')}.pdf")
-        download.save_as(departures_path)
-        logger.info(f"✓ Saved Departure Report: {departures_path}")
+        departures_pdf = str(DOWNLOAD_DIR / f"departures_{datetime.now().strftime('%Y%m%d')}.pdf")
+        download.save_as(departures_pdf)
+        logger.info(f"✓ Saved Departure Report (PDF): {departures_pdf}")
+        
+        # Re-click export for CSV
+        report_page.wait_for_timeout(1000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            for i in range(export_btns.count()):
+                if export_btns.nth(i).is_visible():
+                    export_btns.nth(i).click()
+                    break
+        except:
+            report_page.click("[title='Export']", force=True)
+        
+        # Download CSV
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=CSV (comma delimited)")
+        download = download_info.value
+        departures_csv = str(DOWNLOAD_DIR / f"departures_{datetime.now().strftime('%Y%m%d')}.csv")
+        download.save_as(departures_csv)
+        logger.info(f"✓ Saved Departure Report (CSV): {departures_csv}")
         
         # Close the report tab
         report_page.close()
         
         logger.info("=" * 60)
         logger.info("✓ Daily reports complete!")
-        logger.info(f"  - {arrivals_path}")
-        logger.info(f"  - {departures_path}")
+        logger.info(f"  - {arrivals_pdf}")
+        logger.info(f"  - {arrivals_csv}")
+        logger.info(f"  - {departures_pdf}")
+        logger.info(f"  - {departures_csv}")
         logger.info("=" * 60)
         
-        # Optional: Email the reports
-        # from email_sender import send_email_with_attachment
-        # send_email_with_attachment(arrivals_path, "arrivals.pdf")
-        # send_email_with_attachment(departures_path, "departures.pdf")
+        # Send reports via API email
+        try:
+            from api_email_sender import send_daily_reports
+            logger.info("Sending reports via email API...")
+            if send_daily_reports(arrivals_pdf, departures_pdf, arrivals_csv, departures_csv):
+                logger.info("✓ Email sent successfully!")
+            else:
+                logger.warning("Email sending failed or not configured.")
+        except ImportError:
+            logger.info("Email API not configured (api_email_sender.py). Skipping email.")
+        except Exception as e:
+            logger.error(f"Email error: {e}")
         
     except Exception as e:
         logger.error(f"Report failed: {e}")
@@ -342,8 +391,8 @@ def main():
         logger.info("Scheduling report every 5 minutes")
         schedule.every(5).minutes.do(run_daily_report)
     else:
-        logger.info("Scheduling report daily at 08:00")
-        schedule.every().day.at("08:00").do(run_daily_report)
+        logger.info("Scheduling report daily at 00:01")
+        schedule.every().day.at("00:01").do(run_daily_report)
     
     # Run immediately if --run-now (first time)
     if run_now:
@@ -352,7 +401,7 @@ def main():
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
-    logger.info("1. Scheduled to run daily at 08:00")
+    logger.info("1. Scheduled to run daily at 00:01")
     logger.info("2. Press ENTER at any time to run MANUALLY")
     logger.info("3. Press Ctrl+C to exit")
     logger.info("=" * 60)

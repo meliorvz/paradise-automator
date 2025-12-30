@@ -56,6 +56,9 @@ Run your automation 24/7 on a remote server. You can "remote in" to authenticate
         sudo apt install xrdp
         sudo systemctl enable xrdp
         sudo systemctl start xrdp
+
+# Set Timezone to Brisbane (for 12:01 AM accuracy)
+sudo timedatectl set-timezone Australia/Brisbane
         ```
 
 3.  **Connect via RDP**

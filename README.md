@@ -16,25 +16,18 @@ pip install playwright python-dotenv
 playwright install --with-deps
 ```
 
-### 2. Record Your Actions
+### 2. Login
 
-This records your login session AND the steps to generate the report:
-
-```bash
-playwright codegen https://reimasterapps.com.au/Customers/Dashboard?reicid=758 --save-storage=auth.json
-```
-
-In the browser that opens:
-1. Log in to REI Cloud
-2. Navigate to the cleaning report section
-3. Click buttons to generate/download the report
-4. Close the browser when done
-
-### 3. Secure the Session File
+Run the script manually to log in. The browser window will open.
 
 ```bash
-chmod 600 auth.json
+python3 rei_cloud_automation.py
 ```
+
+1. The browser will open using the profile at `~/.rei-browser-profile`.
+2. Log in to REI Cloud manually.
+3. Once logged in, you can close the browser or press ENTER in the terminal to start the automation.
+4. Your session will be saved automatically for future runs.
 
 ### 4. Configure Email (Optional)
 
@@ -71,8 +64,7 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 
 ```
 ├── rei_cloud_automation.py  # Main script
-├── email_sender.py          # Email utility
-├── auth.json                # Session cookies (generated, DO NOT COMMIT)
+├── api_email_sender.py      # API Email utility
 ├── .env                     # Your credentials (DO NOT COMMIT)
 ├── .env.example             # Template for .env
 ├── downloads/               # Downloaded PDFs
@@ -83,7 +75,7 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 
 ## Security Notes
 
-- `auth.json` and `.env` are in `.gitignore` by default
+- `.env` is in `.gitignore` by default
 - Use Gmail App Password, not your main password
 - Set `chmod 600` on sensitive files
 - For VPS, use environment variables instead of `.env` file
@@ -92,8 +84,8 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 
 If your session expires:
 
+Run the script manually to open the browser:
 ```bash
-playwright codegen https://app.reicloud.com.au --save-storage=auth.json
-# Log in again, then close the browser
-chmod 600 auth.json
+python3 rei_cloud_automation.py
+# Log in again in the browser window
 ```
