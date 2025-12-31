@@ -15,6 +15,7 @@ import logging
 import time
 import signal
 import threading
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +63,29 @@ def cleanup(signum=None, frame=None):
         pass
     sys.exit(0)
 
+
+# State File for tracking successful runs
+STATE_FILE = "automation_state.json"
+
+def load_state():
+    """Load the last successful run date."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_state(date_str):
+    """Save the last successful run date."""
+    try:
+        current = load_state()
+        current["last_run_date"] = date_str
+        with open(STATE_FILE, "w") as f:
+            json.dump(current, f)
+    except Exception as e:
+        logger.error(f"Failed to save state: {e}")
 
 def run_daily_report():
     """Execute the daily report workflow: Arrivals and Departures for tomorrow."""
@@ -261,6 +285,9 @@ def run_daily_report():
             logger.info("Email API not configured (api_email_sender.py). Skipping email.")
         except Exception as e:
             logger.error(f"Email error: {e}")
+            
+        # Save state on success
+        save_state(datetime.now().strftime("%Y-%m-%d"))
         
     except Exception as e:
         logger.error(f"Report failed: {e}")
@@ -268,6 +295,69 @@ def run_daily_report():
             page.screenshot(path=f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
         except:
             pass
+            
+        # Send Failure Alert (SMS/Telegram)
+        try:
+            from api_email_sender import send_failure_alert
+            send_failure_alert(str(e))
+        except Exception as alert_err:
+            logger.error(f"Failed to send failure alert: {alert_err}")
+
+
+def heartbeat_check():
+    """
+    Hourly heartbeat to verify browser session is alive and authenticated.
+    Navigates to dashboard and checks if still logged in.
+    Alerts via SMS/Telegram if session is dead or unauthenticated.
+    """
+    global page, context, playwright_instance
+    
+    logger.info("💓 Running heartbeat check...")
+    
+    try:
+        # Check 1: Is playwright/browser still running?
+        if not playwright_instance or not context or not page:
+            raise Exception("Browser instance not running")
+        
+        # Check 2: Try to navigate to dashboard
+        try:
+            page.goto("https://reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
+            page.wait_for_timeout(3000)
+        except Exception as nav_error:
+            raise Exception(f"Navigation failed: {nav_error}")
+        
+        # Check 3: Are we on the login page? (indicates session expired)
+        current_url = page.url.lower()
+        if "login" in current_url or "account" in current_url:
+            raise Exception("Session expired - redirected to login page")
+        
+        # Check 4: Look for a known dashboard element to confirm we're logged in
+        try:
+            # Look for the Dashboard title or any element that only shows when logged in
+            dashboard_visible = page.locator("text=Dashboard").first.is_visible(timeout=5000)
+            if not dashboard_visible:
+                raise Exception("Dashboard element not found - may not be authenticated")
+        except:
+            # Try alternative check
+            page_content = page.content()
+            if "login" in page_content.lower() and "password" in page_content.lower():
+                raise Exception("Login form detected - session expired")
+        
+        logger.info("✓ Heartbeat OK - Session active")
+        return True
+        
+    except Exception as e:
+        error_msg = f"HEARTBEAT FAILED: {str(e)}"
+        logger.error(error_msg)
+        
+        # Send alert
+        try:
+            from api_email_sender import send_failure_alert
+            send_failure_alert(error_msg)
+        except Exception as alert_err:
+            logger.error(f"Failed to send heartbeat alert: {alert_err}")
+        
+        return False
 
 
 def input_listener(stop_event, trigger_event):
@@ -391,8 +481,12 @@ def main():
         logger.info("Scheduling report every 5 minutes")
         schedule.every(5).minutes.do(run_daily_report)
     else:
-        logger.info("Scheduling report daily at 00:01")
-        schedule.every().day.at("00:01").do(run_daily_report)
+        logger.info("Scheduling report daily at 06:01")
+        schedule.every().day.at("06:01").do(run_daily_report)
+    
+    # Heartbeat check every hour to keep session alive and verify authentication
+    logger.info("Scheduling heartbeat check every hour")
+    schedule.every().hour.do(heartbeat_check)
     
     # Run immediately if --run-now (first time)
     if run_now:
@@ -401,22 +495,51 @@ def main():
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
-    logger.info("1. Scheduled to run daily at 00:01")
-    logger.info("2. Press ENTER at any time to run MANUALLY")
+    logger.info("1. Scheduled to run daily at 06:01")
+    logger.info("2. Heartbeat check every hour")
+    logger.info("3. Press ENTER at any time to run MANUALLY")
     logger.info("3. Press Ctrl+C to exit")
-    logger.info("=" * 60)
-    
+    logger.info("Automation engine started.")
+
     # Setup background thread to listen for ENTER key
     stop_event = threading.Event()
     trigger_event = threading.Event()
     input_thread = threading.Thread(target=input_listener, args=(stop_event, trigger_event), daemon=True)
     input_thread.start()
-    
+
+    alert_sent_today = False 
+
     # Main Loop
     try:
         while True:
             schedule.run_pending()
             
+            # Watchdog: Check for missed run
+            # If it is past 00:30 and we haven't run today, trigger alert
+            now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+            
+            # Reset alert flag at midnight (or close to it)
+            if now.hour == 0 and now.minute < 5:
+                alert_sent_today = False
+
+            if now.hour > 0 and not alert_sent_today:
+                # Check state
+                state = load_state()
+                last_run = state.get("last_run_date")
+                
+                if last_run != today_str:
+                    # MISSED RUN DETECTED!
+                    msg = f"MISSED SCHEDULED RUN for {today_str}. Current time: {now.strftime('%H:%M')}. Please check server."
+                    logger.warning(msg)
+                    
+                    try:
+                        from api_email_sender import send_failure_alert
+                        send_failure_alert(msg)
+                        alert_sent_today = True # Only alert once per day
+                    except Exception as ex:
+                        logger.error(f"Failed to send missed run alert: {ex}")
+
             if trigger_event.is_set():
                 trigger_event.clear()
                 logger.info("Manual trigger detected! Starting report...")

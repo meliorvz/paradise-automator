@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 API_URL = os.getenv("COMMS_API_URL", "https://comms-centre.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
 API_KEY = os.getenv("COMMS_API_KEY", "")
 EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
+EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
+SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
+ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61425252306")  # Default from user
 
 
 def encode_file_base64(file_path: str) -> str:
@@ -87,6 +90,11 @@ def send_email_via_comms_centre(
         "html": html_body,
         "attachments": attachments
     }
+    
+    # Add CC if configured
+    cc_list = [e.strip() for e in EMAIL_CC.split(",") if e.strip()]
+    if cc_list:
+        payload["cc"] = cc_list
     
     headers = {
         "x-integration-key": API_KEY,
@@ -156,16 +164,20 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
             with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # Filter out empty rows or total rows (usually don't have a room number in textBox4)
+                    # Filter out empty rows or total/header rows
                     room = row.get("textBox4", "").strip()
-                    if room and room.lower() != "total arrivals:" and room.lower() != "daily totals:":
-                        data.append({
-                            "room": room,
-                            "adults": row.get("textBox6", "0"),
-                            "children": row.get("textBox7", "0"),
-                            "infants": row.get("textBox8", "0"),
-                            "name": row.get("textBox2") or row.get("textBox27") or "Guest" # Fallback guess
-                        })
+                    if room and room.lower() not in ["total arrivals:", "total departures:", "daily totals:", ""]:
+                        # Verify it's a real room number (numeric or alphanumeric, not a label)
+                        if room.replace(" ", "").replace("-", "")[:1].isdigit():
+                            data.append({
+                                "room": room,
+                                "room_type": row.get("textBox16", "").strip(),  # Room type/format
+                                "adults": row.get("textBox6", "0"),
+                                "children": row.get("textBox7", "0"),
+                                "infants": row.get("textBox8", "0"),
+                                "time": row.get("textBox10", "").strip(),
+                                "name": row.get("textBox19", "").strip() or "Guest"
+                            })
         except Exception as e:
             logger.error(f"Failed to parse CSV {file_path}: {e}")
         return data
@@ -174,19 +186,22 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
     arrivals_data = parse_csv(arrivals_csv)
     departures_data = parse_csv(departures_csv)
     
-    # Generate HTML Tables
-    def make_table(title, rows):
+    # Generate HTML Tables with time column and room type
+    def make_table(title, rows, time_label="Time"):
         if not rows:
             return f"<p>No {title.lower()} scheduled.</p>"
             
-        params = "border: 1px solid #ddd; padding: 8px; text-align: left;"
+        params = "border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top;"
         html = f"<h3>{title} ({len(rows)})</h3>"
         html += "<table style='border-collapse: collapse; width: 100%; font-family: sans-serif;'>"
-        html += f"<tr style='background-color: #f2f2f2;'><th style='{params}'>Room</th><th style='{params}'>Guest</th><th style='{params}'>Pax (A/C/I)</th></tr>"
+        html += f"<tr style='background-color: #f2f2f2;'><th style='{params}'>Room</th><th style='{params}'>Type</th><th style='{params}'>Guest</th><th style='{params}'>Guests</th><th style='{params}'>{time_label}</th></tr>"
         
         for r in rows:
-            pax = f"{r['adults']}/{r['children']}/{r['infants']}"
-            html += f"<tr><td style='{params}'><b>{r['room']}</b></td><td style='{params}'>{r['name']}</td><td style='{params}'>{pax}</td></tr>"
+            # Multi-line PAX format
+            pax_lines = f"{r['adults']} adults<br>{r['children']} children<br>{r['infants']} infants"
+            time_val = r.get('time', '') or '-'
+            room_type = r.get('room_type', '') or '-'
+            html += f"<tr><td style='{params}'><b>{r['room']}</b></td><td style='{params}'>{room_type}</td><td style='{params}'>{r['name']}</td><td style='{params}'>{pax_lines}</td><td style='{params}'><b>{time_val}</b></td></tr>"
         
         html += "</table>"
         return html
@@ -194,7 +209,7 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
     summary_arr = f"{len(arrivals_data)} checking in"
     summary_dep = f"{len(departures_data)} checking out"
     
-    subject = f"Paradise Cleaning {date_str}: {summary_arr}, {summary_dep}"
+    subject = f"Tomorrow's Cleaning {date_str}: {summary_arr}, {summary_dep}"
     
     body = f"""Hi,
 
@@ -206,7 +221,6 @@ Summary:
 
 See the email content for the detailed list.
 
-Automated message from Paradise Automation.
 """
 
     html_body = f"""
@@ -219,9 +233,9 @@ Automated message from Paradise Automation.
             Checking Out: <b>{len(departures_data)}</b> rooms
         </div>
 
-        {make_table("Arrivals", arrivals_data)}
+        {make_table("Arrivals", arrivals_data, time_label="Check-in")}
         <br>
-        {make_table("Departures", departures_data)}
+        {make_table("Departures", departures_data, time_label="Check-out")}
         
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
         <p style="font-size: 0.9em; color: #777;"><i>Attached: PDF Reports (Official)</i></p>
@@ -234,7 +248,139 @@ Automated message from Paradise Automation.
         if p and os.path.exists(p):
             attachments.append(p)
     
-    return send_email_via_comms_centre(subject, body, html_body, attachments)
+    # === STEP 1: Send Email to Recipients ===
+    email_success = send_email_via_comms_centre(subject, body, html_body, attachments)
+    
+    # === STEP 2: SMS Summary to Sender (if configured) ===
+    sms_success = False
+    if SMS_SENDER_NOTIFY:
+        sms_body = f"Tomorrow's Cleaning {date_str}: {summary_arr}, {summary_dep}. Check your email for details."
+        sms_success = send_sms_notification(SMS_SENDER_NOTIFY, sms_body)
+    
+    # === STEP 3: Telegram Delivery Report ===
+    telegram_report = f"📊 Report Delivery Status for {date_str}:\n"
+    telegram_report += f"• Email: {'✅ Sent' if email_success else '❌ FAILED'}\n"
+    if SMS_SENDER_NOTIFY:
+        telegram_report += f"• SMS to Sender: {'✅ Sent' if sms_success else '❌ FAILED'}\n"
+    telegram_report += f"\nSummary: {summary_arr}, {summary_dep}"
+    send_telegram_notification(telegram_report)
+    
+    # === STEP 4: Escalation if email failed ===
+    if not email_success:
+        send_failure_alert(f"Email delivery FAILED for {date_str}. Check server logs.")
+    
+    return email_success
+
+
+def send_sms_notification(to_phone: str, message: str) -> bool:
+    """Send an SMS notification."""
+    if not API_KEY:
+        logger.error("API key not configured for SMS")
+        return False
+        
+    payload = {
+        "channels": ["sms"],
+        "to": [to_phone],
+        "body": message
+    }
+    
+    headers = {
+        "x-integration-key": API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        logger.info(f"Sending SMS to {to_phone}...")
+        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
+        if response.status_code == 200 and response.json().get("success"):
+            logger.info("✓ SMS sent successfully")
+            return True
+        else:
+            logger.error(f"SMS failed: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"SMS error: {e}")
+        return False
+
+
+def send_telegram_notification(message: str) -> bool:
+    """Send a Telegram notification (uses default integration recipients)."""
+    if not API_KEY:
+        logger.error("API key not configured for Telegram")
+        return False
+        
+    payload = {
+        "channels": ["telegram"],
+        "body": message
+    }
+    
+    headers = {
+        "x-integration-key": API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        logger.info("Sending Telegram notification...")
+        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
+        if response.status_code == 200 and response.json().get("success"):
+            logger.info("✓ Telegram notification sent")
+            return True
+        else:
+            logger.error(f"Telegram failed: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
+        return False
+
+
+def send_failure_alert(error_message: str) -> bool:
+    """
+    Send an urgent failure notification via SMS and Telegram.
+    """
+    if not API_KEY:
+        logger.error("COMMS_API_KEY not configured")
+        return False
+
+    subject = "🚨 CRITICAL: REI Automation FAILED"
+    body = f"URGENT: The REI Automation script failed to run.\n\nError: {error_message}\n\nPlease check the server immediately."
+    
+    # User requested SMS to specific number + Telegram
+    # Assuming Telegram uses default integration recipients if no numeric ID provided
+    recipients = [ESCALATION_PHONE]
+    
+    payload = {
+        "channels": ["sms", "telegram"],
+        "to": recipients,
+        "body": body
+    }
+    
+    headers = {
+        "x-integration-key": API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    try:
+        logger.warning(f"Sending FAILURE ALERT to {recipients} via SMS/Telegram...")
+        
+        session = requests.Session()
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+        
+        response = session.post(API_URL, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200 and response.json().get("success"):
+            logger.info("✓ Failure alert sent successfully.")
+            return True
+        else:
+            logger.error(f"Failed to send failure alert: {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending failure alert: {e}")
+        return False
 
 
 if __name__ == "__main__":
