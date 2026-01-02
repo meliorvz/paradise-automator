@@ -383,6 +383,11 @@ def auto_login():
     Automatically log in to REI Cloud using credentials from .env.
     Handles the Azure B2C login flow.
     Returns True if login successful, False otherwise.
+    
+    REI Cloud uses Azure B2C with these form elements:
+    - Email: input#email (type="email", name="Email Address")
+    - Password: input#password (type="password")
+    - Submit: button#next (type="submit", text="Sign in")
     """
     global page
     
@@ -390,11 +395,12 @@ def auto_login():
         logger.info("No REI credentials configured - manual login required")
         return False
     
-    logger.info("Attempting auto-login...")
+    logger.info("Attempting auto-login to REI Cloud...")
     
     try:
-        # Wait for page to settle
-        page.wait_for_timeout(2000)
+        # Wait for login page to fully load
+        logger.info("  → Waiting for login page to load...")
+        page.wait_for_timeout(3000)
         
         # Check if we're on a login page (Azure B2C)
         current_url = page.url.lower()
@@ -403,54 +409,65 @@ def auto_login():
             logger.info("Not on login page - may already be logged in")
             return True
         
-        # Azure B2C login form - fill email/username
+        # Wait for the email field to be visible (confirms page is ready)
+        logger.info("  → Waiting for login form...")
+        try:
+            page.wait_for_selector("input#email", state="visible", timeout=10000)
+        except Exception as e:
+            logger.error(f"Login form did not appear: {e}")
+            return False
+        
+        # Fill email field (REI Cloud uses input#email)
         logger.info("  → Filling in email...")
         try:
-            # Try common email field selectors
-            email_field = page.locator("input[type='email'], input[name='loginfmt'], input#signInName, input[name='email']")
-            email_field.first.fill(REI_USERNAME)
+            email_field = page.locator("input#email")
+            email_field.fill(REI_USERNAME)
             page.wait_for_timeout(500)
         except Exception as e:
-            logger.error(f"Could not find email field: {e}")
+            logger.error(f"Could not fill email field: {e}")
             return False
         
-        # Fill password
+        # Fill password field (REI Cloud uses input#password)
         logger.info("  → Filling in password...")
         try:
-            password_field = page.locator("input[type='password'], input[name='passwd'], input#password, input[name='password']")
-            password_field.first.fill(REI_PASSWORD)
+            password_field = page.locator("input#password")
+            password_field.fill(REI_PASSWORD)
             page.wait_for_timeout(500)
         except Exception as e:
-            logger.error(f"Could not find password field: {e}")
+            logger.error(f"Could not fill password field: {e}")
             return False
         
-        # Click login/submit button
-        logger.info("  → Clicking login button...")
+        # Click the Sign In button (REI Cloud uses button#next)
+        logger.info("  → Clicking 'Sign in' button...")
         try:
-            # Try common submit button selectors
-            submit_btn = page.locator("button[type='submit'], input[type='submit'], button#next, button#idSIButton9")
-            submit_btn.first.click()
+            submit_btn = page.locator("button#next")
+            submit_btn.click()
         except Exception as e:
-            logger.error(f"Could not find submit button: {e}")
+            logger.error(f"Could not click submit button: {e}")
             return False
         
-        # Wait for navigation
+        # Wait for navigation to complete
         logger.info("  → Waiting for login to complete...")
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(8000)  # Give more time for Azure B2C redirect
         
-        # Check if we're now on dashboard
+        # Check if we're now on dashboard (successful login)
         current_url = page.url.lower()
         if "b2clogin" in current_url or "login" in current_url:
-            # Still on login page - check for error
+            # Still on login page - check for error message
             page_content = page.content().lower()
             if "error" in page_content or "incorrect" in page_content or "invalid" in page_content:
                 logger.error("Login failed - incorrect credentials")
                 return False
-            logger.warning("Still on login page after submit - may need additional steps")
+            logger.warning("Still on login page after submit - may need MFA or additional steps")
             return False
         
-        logger.info("✓ Auto-login successful!")
-        return True
+        # Verify we landed on a REI Cloud page
+        if "reimasterapps.com.au" in current_url:
+            logger.info("✓ Auto-login successful!")
+            return True
+        else:
+            logger.warning(f"Unexpected URL after login: {page.url}")
+            return False
         
     except Exception as e:
         logger.error(f"Auto-login error: {e}")
