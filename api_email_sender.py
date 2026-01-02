@@ -17,12 +17,12 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-API_URL = os.getenv("COMMS_API_URL", "https://comms-centre.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
+API_URL = os.getenv("COMMS_API_URL", "https://comms-centre-prod.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
 API_KEY = os.getenv("COMMS_API_KEY", "")
 EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
 EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
 SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
-ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61425252306")  # Default from user
+ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61402526638")  # Default from user
 
 
 def encode_file_base64(file_path: str) -> str:
