@@ -312,7 +312,8 @@ def heartbeat_check():
     """
     Heartbeat to keep session alive and verify browser is authenticated.
     Navigates between pages to generate server activity, then verifies login status.
-    Runs every 30 minutes. Alerts via SMS/Telegram if session is dead or unauthenticated.
+    Runs every 30 minutes. If session expired, attempts auto re-login.
+    Alerts via SMS/Telegram only if re-login also fails.
     """
     global page, context, playwright_instance
     
@@ -365,13 +366,25 @@ def heartbeat_check():
         return True
         
     except Exception as e:
-        error_msg = f"HEARTBEAT FAILED: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"HEARTBEAT ISSUE: {str(e)}"
+        logger.warning(error_msg)
         
-        # Send alert
+        # Attempt auto re-login before alerting
+        if REI_USERNAME and REI_PASSWORD:
+            logger.info("🔄 Attempting automatic re-login...")
+            if auto_login():
+                logger.info("✓ Re-login successful! Session restored.")
+                return True
+            else:
+                logger.error("❌ Re-login failed!")
+        
+        # Re-login failed or no credentials - send alert
+        alert_msg = f"HEARTBEAT FAILED: {str(e)} - Auto re-login also failed or not configured."
+        logger.error(alert_msg)
+        
         try:
             from api_email_sender import send_failure_alert
-            send_failure_alert(error_msg)
+            send_failure_alert(alert_msg)
         except Exception as alert_err:
             logger.error(f"Failed to send heartbeat alert: {alert_err}")
         
