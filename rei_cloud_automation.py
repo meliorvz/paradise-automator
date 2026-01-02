@@ -306,29 +306,43 @@ def run_daily_report():
 
 def heartbeat_check():
     """
-    Hourly heartbeat to verify browser session is alive and authenticated.
-    Navigates to dashboard and checks if still logged in.
-    Alerts via SMS/Telegram if session is dead or unauthenticated.
+    Heartbeat to keep session alive and verify browser is authenticated.
+    Navigates between pages to generate server activity, then verifies login status.
+    Runs every 30 minutes. Alerts via SMS/Telegram if session is dead or unauthenticated.
     """
     global page, context, playwright_instance
     
-    logger.info("💓 Running heartbeat check...")
+    logger.info("💓 Running heartbeat check (keep-alive)...")
     
     try:
         # Check 1: Is playwright/browser still running?
         if not playwright_instance or not context or not page:
             raise Exception("Browser instance not running")
         
-        # Check 2: Try to navigate to dashboard
+        # Step 1: Navigate to Reports page first (generates server activity)
         try:
-            page.goto("https://reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
-            page.wait_for_timeout(3000)
+            logger.info("  → Navigating to Reports page...")
+            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.wait_for_timeout(2000)
         except Exception as nav_error:
-            raise Exception(f"Navigation failed: {nav_error}")
+            raise Exception(f"Navigation to Reports failed: {nav_error}")
+        
+        # Check for login redirect after Reports page
+        current_url = page.url.lower()
+        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
+            raise Exception("Session expired - redirected to login page")
+        
+        # Step 2: Navigate back to Dashboard (second navigation = more activity)
+        try:
+            logger.info("  → Navigating back to Dashboard...")
+            page.goto("https://reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
+            page.wait_for_timeout(2000)
+        except Exception as nav_error:
+            raise Exception(f"Navigation to Dashboard failed: {nav_error}")
         
         # Check 3: Are we on the login page? (indicates session expired)
         current_url = page.url.lower()
-        if "login" in current_url or "account" in current_url:
+        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
             raise Exception("Session expired - redirected to login page")
         
         # Check 4: Look for a known dashboard element to confirm we're logged in
@@ -343,7 +357,7 @@ def heartbeat_check():
             if "login" in page_content.lower() and "password" in page_content.lower():
                 raise Exception("Login form detected - session expired")
         
-        logger.info("✓ Heartbeat OK - Session active")
+        logger.info("✓ Heartbeat OK - Session active and kept alive")
         return True
         
     except Exception as e:
@@ -484,9 +498,9 @@ def main():
         logger.info("Scheduling report daily at 06:01")
         schedule.every().day.at("06:01").do(run_daily_report)
     
-    # Heartbeat check every hour to keep session alive and verify authentication
-    logger.info("Scheduling heartbeat check every hour")
-    schedule.every().hour.do(heartbeat_check)
+    # Heartbeat check every 30 minutes to keep session alive and verify authentication
+    logger.info("Scheduling heartbeat check every 30 minutes")
+    schedule.every(30).minutes.do(heartbeat_check)
     
     # Run immediately if --run-now (first time)
     if run_now:
@@ -496,7 +510,7 @@ def main():
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
     logger.info("1. Scheduled to run daily at 06:01")
-    logger.info("2. Heartbeat check every hour")
+    logger.info("2. Heartbeat check every 30 minutes (keeps session alive)")
     logger.info("3. Press ENTER at any time to run MANUALLY")
     logger.info("3. Press Ctrl+C to exit")
     logger.info("Automation engine started.")
