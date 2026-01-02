@@ -677,13 +677,13 @@ def main():
                 
                 if last_run != today_str:
                     # MISSED RUN DETECTED!
+                    alert_sent_today = True  # Set immediately to prevent alert loop
                     msg = f"MISSED SCHEDULED RUN for {today_str}. Current time: {now.strftime('%H:%M')}. Please check server."
                     logger.warning(msg)
                     
                     try:
                         from api_email_sender import send_failure_alert
                         send_failure_alert(msg)
-                        alert_sent_today = True # Only alert once per day
                     except Exception as ex:
                         logger.error(f"Failed to send missed run alert: {ex}")
 
