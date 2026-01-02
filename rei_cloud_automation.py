@@ -29,6 +29,10 @@ load_dotenv()
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 REI_CLOUD_URL = "https://reimasterapps.com.au/Customers/Dashboard?reicid=758"
 
+# REI Cloud Credentials (optional - for auto-login)
+REI_USERNAME = os.getenv("REI_USERNAME", "")
+REI_PASSWORD = os.getenv("REI_PASSWORD", "")
+
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 # Logging
@@ -374,6 +378,85 @@ def heartbeat_check():
         return False
 
 
+def auto_login():
+    """
+    Automatically log in to REI Cloud using credentials from .env.
+    Handles the Azure B2C login flow.
+    Returns True if login successful, False otherwise.
+    """
+    global page
+    
+    if not REI_USERNAME or not REI_PASSWORD:
+        logger.info("No REI credentials configured - manual login required")
+        return False
+    
+    logger.info("Attempting auto-login...")
+    
+    try:
+        # Wait for page to settle
+        page.wait_for_timeout(2000)
+        
+        # Check if we're on a login page (Azure B2C)
+        current_url = page.url.lower()
+        if "b2clogin" not in current_url and "login" not in current_url:
+            # Already logged in or on dashboard
+            logger.info("Not on login page - may already be logged in")
+            return True
+        
+        # Azure B2C login form - fill email/username
+        logger.info("  → Filling in email...")
+        try:
+            # Try common email field selectors
+            email_field = page.locator("input[type='email'], input[name='loginfmt'], input#signInName, input[name='email']")
+            email_field.first.fill(REI_USERNAME)
+            page.wait_for_timeout(500)
+        except Exception as e:
+            logger.error(f"Could not find email field: {e}")
+            return False
+        
+        # Fill password
+        logger.info("  → Filling in password...")
+        try:
+            password_field = page.locator("input[type='password'], input[name='passwd'], input#password, input[name='password']")
+            password_field.first.fill(REI_PASSWORD)
+            page.wait_for_timeout(500)
+        except Exception as e:
+            logger.error(f"Could not find password field: {e}")
+            return False
+        
+        # Click login/submit button
+        logger.info("  → Clicking login button...")
+        try:
+            # Try common submit button selectors
+            submit_btn = page.locator("button[type='submit'], input[type='submit'], button#next, button#idSIButton9")
+            submit_btn.first.click()
+        except Exception as e:
+            logger.error(f"Could not find submit button: {e}")
+            return False
+        
+        # Wait for navigation
+        logger.info("  → Waiting for login to complete...")
+        page.wait_for_timeout(5000)
+        
+        # Check if we're now on dashboard
+        current_url = page.url.lower()
+        if "b2clogin" in current_url or "login" in current_url:
+            # Still on login page - check for error
+            page_content = page.content().lower()
+            if "error" in page_content or "incorrect" in page_content or "invalid" in page_content:
+                logger.error("Login failed - incorrect credentials")
+                return False
+            logger.warning("Still on login page after submit - may need additional steps")
+            return False
+        
+        logger.info("✓ Auto-login successful!")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Auto-login error: {e}")
+        return False
+
+
 def input_listener(stop_event, trigger_event):
     """Listens for user input in a separate thread."""
     while not stop_event.is_set():
@@ -452,19 +535,38 @@ def main():
             is_logged_in = True
     except:
         pass
-        
+    
+    # Try auto-login if not logged in and credentials are available
+    if not is_logged_in and REI_USERNAME and REI_PASSWORD:
+        logger.info("Credentials found in .env - attempting auto-login...")
+        if auto_login():
+            is_logged_in = True
+            # Give it a moment to fully load dashboard
+            page.wait_for_timeout(3000)
+            # Verify we're on dashboard
+            try:
+                if "Dashboard" in page.url or ("reimasterapps.com.au" in page.url and "b2clogin" not in page.url):
+                    is_logged_in = True
+                else:
+                    is_logged_in = False
+            except:
+                is_logged_in = False
+    
     logger.info("")
     logger.info("=" * 60)
     if is_logged_in:
-        logger.info("Looks like you might be logged in (or close to it).")
-        logger.info("If you are on the Dashboard, press ENTER to start automation.")
+        logger.info("✓ Logged in successfully!")
+        logger.info("Starting automation in 3 seconds...")
+        logger.info("=" * 60)
+        time.sleep(3)  # Brief pause before starting
     else:
+        if REI_USERNAME and REI_PASSWORD:
+            logger.warning("Auto-login failed. Please log in manually.")
         logger.info("LOG IN to REI Master Apps in the browser window.")
         logger.info("When you're logged in and on the dashboard,")
         logger.info("come back here and press ENTER to continue...")
-    logger.info("=" * 60)
-    
-    sys.stdin.readline()  # Wait for Enter
+        logger.info("=" * 60)
+        sys.stdin.readline()  # Wait for Enter
     
     logger.info("✓ Starting automation engine...")
     
