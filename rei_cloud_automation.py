@@ -16,7 +16,7 @@ import time
 import signal
 import threading
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import schedule
@@ -71,8 +71,14 @@ def cleanup(signum=None, frame=None):
 # State File for tracking successful runs
 STATE_FILE = "automation_state.json"
 
+# Schedule configuration
+SCHEDULED_RUN_HOUR = 6
+SCHEDULED_RUN_MINUTE = 1
+GRACE_PERIOD_MINUTES = 10
+
+
 def load_state():
-    """Load the last successful run date."""
+    """Load the automation state."""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
@@ -81,15 +87,113 @@ def load_state():
             pass
     return {}
 
-def save_state(date_str):
-    """Save the last successful run date."""
+
+def save_state(state):
+    """Save the automation state."""
     try:
-        current = load_state()
-        current["last_run_date"] = date_str
         with open(STATE_FILE, "w") as f:
-            json.dump(current, f)
+            json.dump(state, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
+
+
+def get_next_scheduled_time(from_time=None):
+    """
+    Calculate the next scheduled run time (tomorrow at SCHEDULED_RUN_HOUR:SCHEDULED_RUN_MINUTE).
+    Returns ISO format string.
+    """
+    if from_time is None:
+        from_time = datetime.now()
+    
+    # Next run is tomorrow at the scheduled time
+    tomorrow = from_time.date() + timedelta(days=1)
+    next_run = datetime.combine(tomorrow, datetime.min.time().replace(
+        hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE
+    ))
+    return next_run.isoformat()
+
+
+def save_successful_run():
+    """
+    Record a successful run. Updates last_successful_run and calculates next_expected_run.
+    Called after ANY successful run (scheduled or manual).
+    """
+    now = datetime.now()
+    state = load_state()
+    state["last_successful_run"] = now.isoformat()
+    state["next_expected_run"] = get_next_scheduled_time(now)
+    save_state(state)
+    logger.info(f"State saved: last_successful_run={now.isoformat()}, next_expected_run={state['next_expected_run']}")
+
+
+def init_state_if_needed():
+    """
+    Initialize state on startup if next_expected_run is missing.
+    Also migrates legacy 'last_run_date' to new format.
+    Sets next_expected_run to today's scheduled time if before that time,
+    or tomorrow if after.
+    """
+    state = load_state()
+    
+    # Migrate legacy state: convert last_run_date to last_successful_run
+    if "last_run_date" in state and "last_successful_run" not in state:
+        # Convert date string to full timestamp (assume it ran at scheduled time)
+        try:
+            old_date = datetime.strptime(state["last_run_date"], "%Y-%m-%d")
+            migrated_time = old_date.replace(hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE)
+            state["last_successful_run"] = migrated_time.isoformat()
+            del state["last_run_date"]  # Remove legacy field
+            logger.info(f"Migrated legacy state: last_run_date -> last_successful_run={state['last_successful_run']}")
+        except Exception as e:
+            logger.error(f"Failed to migrate legacy state: {e}")
+    
+    if "next_expected_run" not in state:
+        now = datetime.now()
+        today_scheduled = datetime.combine(now.date(), datetime.min.time().replace(
+            hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE
+        ))
+        
+        if now < today_scheduled:
+            # Before today's run time - set deadline to today
+            state["next_expected_run"] = today_scheduled.isoformat()
+        else:
+            # After today's run time - set deadline to tomorrow
+            state["next_expected_run"] = get_next_scheduled_time(now)
+        
+        save_state(state)
+        logger.info(f"Initialized state with next_expected_run={state['next_expected_run']}")
+    
+    return state
+
+
+def is_past_deadline():
+    """
+    Check if current time is past the deadline (next_expected_run + grace period).
+    Returns (is_past, next_expected_run_dt, last_successful_run_dt)
+    """
+    state = load_state()
+    next_run_str = state.get("next_expected_run")
+    last_success_str = state.get("last_successful_run")
+    
+    if not next_run_str:
+        return False, None, None
+    
+    try:
+        next_run_dt = datetime.fromisoformat(next_run_str)
+        deadline = next_run_dt + timedelta(minutes=GRACE_PERIOD_MINUTES)
+        
+        last_success_dt = None
+        if last_success_str:
+            last_success_dt = datetime.fromisoformat(last_success_str)
+        
+        now = datetime.now()
+        is_past = now > deadline
+        
+        return is_past, next_run_dt, last_success_dt
+    except Exception as e:
+        logger.error(f"Error parsing state timestamps: {e}")
+        return False, None, None
+
 
 def run_daily_report():
     """Execute the daily report workflow: Arrivals and Departures for tomorrow."""
@@ -291,7 +395,7 @@ def run_daily_report():
             logger.error(f"Email error: {e}")
             
         # Save state on success
-        save_state(datetime.now().strftime("%Y-%m-%d"))
+        save_successful_run()
         
     except Exception as e:
         logger.error(f"Report failed: {e}")
@@ -502,15 +606,17 @@ def auto_login():
 
 
 def input_listener(stop_event, trigger_event):
-    """Listens for user input in a separate thread."""
+    """Listens for 'run' command in a separate thread."""
     while not stop_event.is_set():
         try:
-            # This blocks, but it's in a daemon thread so it's fine
             line = sys.stdin.readline()
             if not line:
                 break
-            if not stop_event.is_set():
+            # Only trigger on explicit 'run' command
+            if line.strip().lower() == "run" and not stop_event.is_set():
                 trigger_event.set()
+            elif line.strip() and not stop_event.is_set():
+                logger.info("Type 'run' and press Enter to manually trigger the report.")
         except:
             break
 
@@ -655,57 +761,66 @@ def main():
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
-    logger.info("1. Scheduled to run daily at 06:01")
+    logger.info(f"1. Scheduled to run daily at {SCHEDULED_RUN_HOUR:02d}:{SCHEDULED_RUN_MINUTE:02d}")
     logger.info("2. Heartbeat check every 30 minutes (keeps session alive)")
-    logger.info("3. Press ENTER at any time to run MANUALLY")
-    logger.info("3. Press Ctrl+C to exit")
+    logger.info("3. Type 'run' + Enter to trigger MANUALLY")
+    logger.info("4. Press Ctrl+C to exit")
     logger.info("Automation engine started.")
 
-    # Setup background thread to listen for ENTER key
+    # Setup background thread to listen for 'run' command
     stop_event = threading.Event()
     trigger_event = threading.Event()
     input_thread = threading.Thread(target=input_listener, args=(stop_event, trigger_event), daemon=True)
     input_thread.start()
 
-    alert_sent_today = False 
+    # Initialize state if needed (sets next_expected_run)
+    init_state_if_needed()
+    
+    alert_sent_for_current_deadline = False
+    current_deadline_str = None  # Track which deadline we've alerted for
 
     # Main Loop
     try:
         while True:
             schedule.run_pending()
             
-            # Watchdog: Check for missed run
-            # If it is past 00:30 and we haven't run today, trigger alert
-            now = datetime.now()
-            today_str = now.strftime("%Y-%m-%d")
+            # Watchdog: Check for missed run using deadline-based logic
+            # Only alert if: past deadline (scheduled time + grace period) AND no success since deadline
+            is_past, next_expected_dt, last_success_dt = is_past_deadline()
             
-            # Reset alert flag at midnight (or close to it)
-            if now.hour == 0 and now.minute < 5:
-                alert_sent_today = False
-
-            if now.hour > 0 and not alert_sent_today:
-                # Check state
-                state = load_state()
-                last_run = state.get("last_run_date")
+            if is_past and next_expected_dt:
+                deadline_str = next_expected_dt.isoformat()
                 
-                if last_run != today_str:
-                    # MISSED RUN DETECTED!
-                    alert_sent_today = True  # Set immediately to prevent alert loop
-                    msg = f"MISSED SCHEDULED RUN for {today_str}. Current time: {now.strftime('%H:%M')}. Please check server."
-                    logger.warning(msg)
+                # Reset alert flag when deadline changes (new day)
+                if deadline_str != current_deadline_str:
+                    current_deadline_str = deadline_str
+                    alert_sent_for_current_deadline = False
+                
+                # Check if we should alert
+                if not alert_sent_for_current_deadline:
+                    # No successful run before this deadline?
+                    missed_run = (last_success_dt is None) or (last_success_dt < next_expected_dt)
                     
-                    try:
-                        from api_email_sender import send_failure_alert
-                        send_failure_alert(msg)
-                    except Exception as ex:
-                        logger.error(f"Failed to send missed run alert: {ex}")
+                    if missed_run:
+                        alert_sent_for_current_deadline = True
+                        now = datetime.now()
+                        msg = f"MISSED SCHEDULED RUN. Expected by: {next_expected_dt.strftime('%Y-%m-%d %H:%M')}. Current time: {now.strftime('%H:%M')}. Please check server."
+                        logger.warning(msg)
+                        
+                        try:
+                            from api_email_sender import send_failure_alert
+                            send_failure_alert(msg)
+                        except Exception as ex:
+                            logger.error(f"Failed to send missed run alert: {ex}")
+                    else:
+                        # We already have a successful run for this deadline, just set flag
+                        alert_sent_for_current_deadline = True
 
             if trigger_event.is_set():
                 trigger_event.clear()
                 logger.info("Manual trigger detected! Starting report...")
                 run_daily_report()
-                logger.info("Report complete. Waiting for next schedule or manual trigger (Enter).")
-                
+                logger.info("Report complete. Waiting for next schedule or type 'run' to trigger manually.")                
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("\nStopping...")
