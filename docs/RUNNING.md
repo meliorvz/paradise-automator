@@ -12,7 +12,8 @@ This guide covers all the ways to run the Paradise Automator bot.
 | VPS via SSH (headless) | `run-headless.sh` | `./run-headless.sh` |
 | Local testing (Mac) | `run.sh` | `./run.sh` |
 | Test mode (runs every 5 min) | Either | `./run.sh --test` |
-| Run report immediately | Either | `./run.sh --run-now` |
+| Run daily report immediately | Either | `./run.sh --run-now` |
+| Run weekly report immediately | Either | `./run.sh --run-weekly` |
 
 ---
 
@@ -201,19 +202,39 @@ screen -X -S bot quit
 
 | Option | Description |
 |--------|-------------|
-| (none) | Production mode - runs report daily at 06:01 |
+| (none) | Production mode - daily at 06:01, weekly on Saturdays at 10:00 |
 | `--test` | Test mode - runs report every 5 minutes |
-| `--run-now` | Run one report immediately, then continue with schedule |
+| `--run-now` | Run daily report immediately, then continue with schedule |
+| `--run-weekly` | Run weekly report immediately, then continue with schedule |
 | `--record` | Development mode - record workflow URLs |
+
+### Schedules
+
+| Report | Schedule | Email Content |
+|--------|----------|---------------|
+| Daily | 06:01 every day | Tomorrow's arrivals/departures |
+| Weekly | 10:00 every Saturday | Next 7 days, day-by-day summary for cleaning company planning |
+
+### Manual Triggers (while bot is running)
+
+Type these commands while the bot is running to manually trigger reports:
+
+| Command | Action |
+|---------|--------|
+| `run_d` | Trigger daily report immediately |
+| `run_w` | Trigger weekly report immediately |
 
 ### Examples
 
 ```bash
-# Production mode (daily at 06:01)
+# Production mode (daily at 06:01, weekly Saturdays at 10:00)
 ./run-headless.sh
 
-# Run immediately, then continue daily schedule
+# Run daily report immediately, then continue schedule
 ./run-headless.sh --run-now
+
+# Run weekly report immediately, then continue schedule
+./run-headless.sh --run-weekly
 
 # Test mode (every 5 minutes)
 ./run-headless.sh --test
