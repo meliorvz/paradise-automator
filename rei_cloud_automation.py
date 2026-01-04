@@ -195,6 +195,43 @@ def is_past_deadline():
         return False, None, None
 
 
+def configure_report_options(target_page):
+    """
+    Enable 'Hide' options in the report modal before preview.
+    Toggles: Hide Account Balances, Hide Guest Comments, Hide Manager Comments.
+    Uses Bootstrap Switch - clicks the wrapper div if the checkbox is unchecked.
+    """
+    hide_options = [
+        ("hide_account_balances", "Hide Account Balances"),
+        ("hide_guest_comment", "Hide Guest Comments"),  # Note: singular
+        ("hide_manager_comments", "Hide Manager Comments"),  # Note: plural
+    ]
+    
+    for option_id, option_name in hide_options:
+        try:
+            checkbox = target_page.locator(f"#{option_id}")
+            if checkbox.count() > 0:
+                is_checked = checkbox.is_checked()
+                if not is_checked:
+                    # Click the Bootstrap switch wrapper to toggle it on
+                    switch_wrapper = target_page.locator(f".bootstrap-switch-id-{option_id}")
+                    if switch_wrapper.count() > 0:
+                        switch_wrapper.click()
+                        logger.info(f"  ✓ Enabled: {option_name}")
+                    else:
+                        # Fallback: click the checkbox directly
+                        checkbox.click()
+                        logger.info(f"  ✓ Enabled (fallback): {option_name}")
+                else:
+                    logger.info(f"  - Already enabled: {option_name}")
+            else:
+                logger.warning(f"  Option not found: {option_name} (#{option_id})")
+        except Exception as e:
+            logger.warning(f"  Could not set {option_name}: {e}")
+    
+    target_page.wait_for_timeout(500)
+
+
 def run_daily_report():
     """Execute the daily report workflow: Arrivals and Departures for tomorrow."""
     global page, context
@@ -222,6 +259,10 @@ def run_daily_report():
             page.click("text=Arrival Report")
             
         page.wait_for_timeout(2000)
+        
+        # Configure hide options
+        logger.info("Configuring report options (Hide toggles)...")
+        configure_report_options(page)
         
         # Select Tomorrow in the popup
         logger.info("Selecting 'Tomorrow' for reports...")
@@ -306,6 +347,10 @@ def run_daily_report():
         page.click("text=Departure Report")
         page.wait_for_timeout(2000)
         
+        # Configure hide options
+        logger.info("Configuring report options (Hide toggles)...")
+        configure_report_options(page)
+        
         # Select Tomorrow in the popup
         page.click("text=Tomorrow")
         page.wait_for_timeout(1000)
@@ -383,9 +428,9 @@ def run_daily_report():
         
         # Send reports via API email
         try:
-            from api_email_sender import send_daily_reports
+            from api_email_sender import send_reports
             logger.info("Sending reports via email API...")
-            if send_daily_reports(arrivals_pdf, departures_pdf, arrivals_csv, departures_csv):
+            if send_reports(arrivals_pdf, departures_pdf, arrivals_csv, departures_csv):
                 logger.info("✓ Email sent successfully!")
             else:
                 logger.warning("Email sending failed or not configured.")
@@ -408,6 +453,227 @@ def run_daily_report():
         try:
             from api_email_sender import send_failure_alert
             send_failure_alert(str(e))
+        except Exception as alert_err:
+            logger.error(f"Failed to send failure alert: {alert_err}")
+
+
+def run_weekly_report():
+    """Execute the weekly report workflow: Arrivals and Departures for next 7 days."""
+    global page, context
+    
+    logger.info("=" * 60)
+    logger.info(f"RUNNING WEEKLY REPORT - {datetime.now()}")
+    logger.info("=" * 60)
+    
+    try:
+        # Go to Report List
+        logger.info("Navigating to Report List...")
+        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.wait_for_timeout(3000)
+        
+        # ===== ARRIVAL REPORT (WEEKLY) =====
+        logger.info("Generating Arrival Report for next 7 days...")
+        
+        # Click on Arrival Report
+        try:
+            page.click("text=Arrival Report", timeout=5000)
+        except:
+            logger.info("Retry clicking Arrival Report...")
+            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758")
+            page.wait_for_timeout(3000)
+            page.click("text=Arrival Report")
+            
+        page.wait_for_timeout(2000)
+        
+        # Configure hide options
+        logger.info("Configuring report options (Hide toggles)...")
+        configure_report_options(page)
+        
+        # Select Next 7 Days
+        logger.info("Selecting 'Next 7 Days' for reports...")
+        try:
+            page.evaluate("document.querySelector('#bookingNext7').parentNode.querySelector('.iCheck-helper').click()")
+        except:
+            page.click("label[for='bookingNext7']", force=True)
+        page.wait_for_timeout(1000)
+        
+        # Click Preview button - this opens a new tab
+        with context.expect_page() as new_page_info:
+            page.click("a#btnPreviewBookingDate")
+        report_page = new_page_info.value
+        report_page.wait_for_load_state("networkidle")
+        logger.info("Report preview opened in new tab")
+        
+        # Click the export dropdown button
+        report_page.wait_for_timeout(2000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            count = export_btns.count()
+            export_clicked = False
+            
+            for i in range(count):
+                if export_btns.nth(i).is_visible():
+                    logger.info("Found visible export button, clicking...")
+                    export_btns.nth(i).click()
+                    export_clicked = True
+                    break
+            
+            if not export_clicked:
+                logger.warning("No visible export button found, attempting force click on first...")
+                export_btns.first.click(force=True)
+                
+        except Exception as e:
+            logger.error(f"Error clicking export button: {e}")
+            report_page.click("li#trv-main-menu-export-command > a", force=True)
+
+        # Download PDF
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=Acrobat (PDF) file")
+        download = download_info.value
+        arrivals_pdf = str(DOWNLOAD_DIR / f"weekly_arrivals_{datetime.now().strftime('%Y%m%d')}.pdf")
+        download.save_as(arrivals_pdf)
+        logger.info(f"✓ Saved Weekly Arrival Report (PDF): {arrivals_pdf}")
+        
+        # Re-click export for CSV
+        report_page.wait_for_timeout(1000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            for i in range(export_btns.count()):
+                if export_btns.nth(i).is_visible():
+                    export_btns.nth(i).click()
+                    break
+        except:
+            report_page.click("[title='Export']", force=True)
+        
+        # Download CSV
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=CSV (comma delimited)")
+        download = download_info.value
+        arrivals_csv = str(DOWNLOAD_DIR / f"weekly_arrivals_{datetime.now().strftime('%Y%m%d')}.csv")
+        download.save_as(arrivals_csv)
+        logger.info(f"✓ Saved Weekly Arrival Report (CSV): {arrivals_csv}")
+        
+        # Close the report tab
+        report_page.close()
+        page.wait_for_timeout(2000)
+        
+        # Go back to Report List
+        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.wait_for_timeout(3000)
+        
+        # ===== DEPARTURE REPORT (WEEKLY) =====
+        logger.info("Generating Departure Report for next 7 days...")
+        
+        # Click on Departure Report
+        page.click("text=Departure Report")
+        page.wait_for_timeout(2000)
+        
+        # Configure hide options
+        logger.info("Configuring report options (Hide toggles)...")
+        configure_report_options(page)
+        
+        # Select Next 7 Days
+        try:
+            page.evaluate("document.querySelector('#bookingNext7').parentNode.querySelector('.iCheck-helper').click()")
+        except:
+            page.click("label[for='bookingNext7']", force=True)
+        page.wait_for_timeout(1000)
+        
+        # Click Preview button - this opens a new tab
+        with context.expect_page() as new_page_info:
+            page.click("a#btnPreviewBookingDate")
+        report_page = new_page_info.value
+        report_page.wait_for_load_state("networkidle")
+        logger.info("Report preview opened in new tab")
+        
+        # Click the export dropdown button
+        report_page.wait_for_timeout(2000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            count = export_btns.count()
+            export_clicked = False
+            
+            for i in range(count):
+                if export_btns.nth(i).is_visible():
+                    logger.info("Found visible export button, clicking...")
+                    export_btns.nth(i).click()
+                    export_clicked = True
+                    break
+            
+            if not export_clicked:
+                logger.warning("No visible export button found, attempting force click on first...")
+                export_btns.first.click(force=True)
+                
+        except Exception as e:
+            logger.error(f"Error clicking export button: {e}")
+            report_page.click("li#trv-main-menu-export-command > a", force=True)
+
+        # Download PDF
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=Acrobat (PDF) file")
+        download = download_info.value
+        departures_pdf = str(DOWNLOAD_DIR / f"weekly_departures_{datetime.now().strftime('%Y%m%d')}.pdf")
+        download.save_as(departures_pdf)
+        logger.info(f"✓ Saved Weekly Departure Report (PDF): {departures_pdf}")
+        
+        # Re-click export for CSV
+        report_page.wait_for_timeout(1000)
+        try:
+            export_btns = report_page.locator("[title='Export']")
+            for i in range(export_btns.count()):
+                if export_btns.nth(i).is_visible():
+                    export_btns.nth(i).click()
+                    break
+        except:
+            report_page.click("[title='Export']", force=True)
+        
+        # Download CSV
+        with report_page.expect_download() as download_info:
+            report_page.wait_for_timeout(500)
+            report_page.click("text=CSV (comma delimited)")
+        download = download_info.value
+        departures_csv = str(DOWNLOAD_DIR / f"weekly_departures_{datetime.now().strftime('%Y%m%d')}.csv")
+        download.save_as(departures_csv)
+        logger.info(f"✓ Saved Weekly Departure Report (CSV): {departures_csv}")
+        
+        # Close the report tab
+        report_page.close()
+        
+        logger.info("=" * 60)
+        logger.info("✓ Weekly reports complete!")
+        logger.info(f"  - {arrivals_pdf}")
+        logger.info(f"  - {arrivals_csv}")
+        logger.info(f"  - {departures_pdf}")
+        logger.info(f"  - {departures_csv}")
+        logger.info("=" * 60)
+        
+        # Send reports via API email (reusing daily email function)
+        try:
+            from api_email_sender import send_reports
+            logger.info("Sending weekly reports via email API...")
+            if send_reports(arrivals_pdf, departures_pdf, arrivals_csv, departures_csv, report_type="Weekly"):
+                logger.info("✓ Weekly email sent successfully!")
+            else:
+                logger.warning("Weekly email sending failed or not configured.")
+        except ImportError:
+            logger.info("Email API not configured (api_email_sender.py). Skipping email.")
+        except Exception as e:
+            logger.error(f"Weekly email error: {e}")
+            
+    except Exception as e:
+        logger.error(f"Weekly report failed: {e}")
+        try:
+            page.screenshot(path=f"weekly_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        except:
+            pass
+            
+        # Send Failure Alert (SMS/Telegram)
+        try:
+            from api_email_sender import send_failure_alert
+            send_failure_alert(f"WEEKLY REPORT FAILED: {str(e)}")
         except Exception as alert_err:
             logger.error(f"Failed to send failure alert: {alert_err}")
 
@@ -586,13 +852,40 @@ def auto_login():
                 logger.info("✓ Auto-login successful!")
                 return True
             
-            # Still on login page - check for actual errors
+            # Still on login page - check for actual visible errors
             if "b2clogin" in current_url or "login" in current_url:
-                page_content = page.content().lower()
-                if "incorrect" in page_content or "invalid" in page_content or "wrong" in page_content:
-                    logger.error("Login failed - incorrect credentials")
-                    return False
-                # No error, might just need another attempt (Azure B2C quirk)
+                # Azure B2C shows errors in a specific error element, not just anywhere on the page
+                # Check for visible error messages using known B2C error selectors
+                try:
+                    # Common Azure B2C error selectors
+                    error_selectors = [
+                        ".error.itemLevel",  # B2C item-level error
+                        ".error.pageLevel",  # B2C page-level error
+                        "#error",            # Generic error div
+                        ".error-message",    # Alternative error class
+                        "[aria-live='polite'].error"  # Accessible error
+                    ]
+                    
+                    has_visible_error = False
+                    for selector in error_selectors:
+                        try:
+                            error_elem = page.locator(selector)
+                            if error_elem.count() > 0 and error_elem.first.is_visible():
+                                error_text = error_elem.first.text_content() or ""
+                                if error_text.strip():  # Only count if there's actual text
+                                    logger.error(f"Login failed - error shown: {error_text.strip()}")
+                                    has_visible_error = True
+                                    break
+                        except:
+                            continue
+                    
+                    if has_visible_error:
+                        return False
+                        
+                except Exception as err_check:
+                    logger.debug(f"Error checking for login errors: {err_check}")
+                
+                # No visible error, might just need another attempt (Azure B2C quirk)
                 logger.info(f"  Still on login page, will retry...")
                 continue
                 
@@ -605,18 +898,20 @@ def auto_login():
     return False
 
 
-def input_listener(stop_event, trigger_event):
-    """Listens for 'run' command in a separate thread."""
+def input_listener(stop_event, trigger_daily_event, trigger_weekly_event):
+    """Listens for 'run_d' or 'run_w' command in a separate thread."""
     while not stop_event.is_set():
         try:
             line = sys.stdin.readline()
             if not line:
                 break
-            # Only trigger on explicit 'run' command
-            if line.strip().lower() == "run" and not stop_event.is_set():
-                trigger_event.set()
-            elif line.strip() and not stop_event.is_set():
-                logger.info("Type 'run' and press Enter to manually trigger the report.")
+            cmd = line.strip().lower()
+            if cmd == "run_d" and not stop_event.is_set():
+                trigger_daily_event.set()
+            elif cmd == "run_w" and not stop_event.is_set():
+                trigger_weekly_event.set()
+            elif cmd and not stop_event.is_set():
+                logger.info("Type 'run_d' for daily report or 'run_w' for weekly report.")
         except:
             break
 
@@ -659,6 +954,7 @@ def main():
     record_mode = "--record" in sys.argv
     test_mode = "--test" in sys.argv
     run_now = "--run-now" in sys.argv
+    run_weekly = "--run-weekly" in sys.argv
     
     logger.info("=" * 60)
     logger.info("REI CLOUD AUTOMATION")
@@ -750,27 +1046,38 @@ def main():
         logger.info("Scheduling report daily at 06:01")
         schedule.every().day.at("06:01").do(run_daily_report)
     
+    # Weekly report every Saturday at 10:00 AM
+    logger.info("Scheduling weekly report every Saturday at 10:00")
+    schedule.every().saturday.at("10:00").do(run_weekly_report)
+    
     # Heartbeat check every 30 minutes to keep session alive and verify authentication
     logger.info("Scheduling heartbeat check every 30 minutes")
     schedule.every(30).minutes.do(heartbeat_check)
     
     # Run immediately if --run-now (first time)
     if run_now:
-        logger.info("Running initial report (--run-now)...")
+        logger.info("Running initial daily report (--run-now)...")
         run_daily_report()
+    
+    # Run weekly immediately if --run-weekly
+    if run_weekly:
+        logger.info("Running weekly report (--run-weekly)...")
+        run_weekly_report()
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
-    logger.info(f"1. Scheduled to run daily at {SCHEDULED_RUN_HOUR:02d}:{SCHEDULED_RUN_MINUTE:02d}")
-    logger.info("2. Heartbeat check every 30 minutes (keeps session alive)")
-    logger.info("3. Type 'run' + Enter to trigger MANUALLY")
-    logger.info("4. Press Ctrl+C to exit")
+    logger.info(f"1. Daily report scheduled at {SCHEDULED_RUN_HOUR:02d}:{SCHEDULED_RUN_MINUTE:02d}")
+    logger.info("2. Weekly report scheduled every Saturday at 10:00")
+    logger.info("3. Heartbeat check every 30 minutes (keeps session alive)")
+    logger.info("4. Type 'run_d' for daily report, 'run_w' for weekly report")
+    logger.info("5. Press Ctrl+C to exit")
     logger.info("Automation engine started.")
 
-    # Setup background thread to listen for 'run' command
+    # Setup background thread to listen for manual trigger commands
     stop_event = threading.Event()
-    trigger_event = threading.Event()
-    input_thread = threading.Thread(target=input_listener, args=(stop_event, trigger_event), daemon=True)
+    trigger_daily_event = threading.Event()
+    trigger_weekly_event = threading.Event()
+    input_thread = threading.Thread(target=input_listener, args=(stop_event, trigger_daily_event, trigger_weekly_event), daemon=True)
     input_thread.start()
 
     # Initialize state if needed (sets next_expected_run)
@@ -816,11 +1123,19 @@ def main():
                         # We already have a successful run for this deadline, just set flag
                         alert_sent_for_current_deadline = True
 
-            if trigger_event.is_set():
-                trigger_event.clear()
-                logger.info("Manual trigger detected! Starting report...")
+            # Handle manual daily trigger
+            if trigger_daily_event.is_set():
+                trigger_daily_event.clear()
+                logger.info("Manual daily trigger detected! Starting daily report...")
                 run_daily_report()
-                logger.info("Report complete. Waiting for next schedule or type 'run' to trigger manually.")                
+                logger.info("Daily report complete. Type 'run_d' or 'run_w' to trigger manually.")
+            
+            # Handle manual weekly trigger
+            if trigger_weekly_event.is_set():
+                trigger_weekly_event.clear()
+                logger.info("Manual weekly trigger detected! Starting weekly report...")
+                run_weekly_report()
+                logger.info("Weekly report complete. Type 'run_d' or 'run_w' to trigger manually.")                
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("\nStopping...")

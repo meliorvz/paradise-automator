@@ -142,46 +142,98 @@ def send_email_via_comms_centre(
         return False
 
 
-def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = None, departures_csv: str = None) -> bool:
+def parse_csv(file_path: str) -> list[dict]:
+    """Helper to parse CSV and get rows."""
+    import csv
+    data = []
+    if not file_path or not os.path.exists(file_path):
+        return data
+        
+    try:
+        with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Filter out empty rows or total/header rows
+                # Correct mapping: TrnReference1 is the Room ID, textBox4 is the Booking Number
+                room = row.get("TrnReference1", "").strip()
+                booking_ref = row.get("textBox4", "").strip()
+                date_str = row.get("textBox2", "").strip()  # e.g. "Sunday, 4 January 2026"
+                
+                if room and room.lower() not in ["total arrivals:", "total departures:", "daily totals:", "", "room"]:
+                    # Filter out BONDREFUND entries (cancelled bookings, refund placeholders)
+                    if "BONDREFUND" in room.upper():
+                        continue
+                    # Verify it's a real room number (starts with digit or letter for named rooms)
+                    first_char = room.replace(" ", "").replace("-", "")[:1]
+                    if first_char.isalnum():
+                        data.append({
+                            "room": room,
+                            "booking_ref": booking_ref,
+                            "room_type": row.get("textBox16", "").strip(),
+                            "adults": row.get("textBox6", "0"),
+                            "children": row.get("textBox7", "0"),
+                            "infants": row.get("textBox8", "0"),
+                            "time": row.get("textBox10", "").strip(),
+                            "name": row.get("textBox19", "").strip() or "Guest",
+                            "date": date_str
+                        })
+    except Exception as e:
+        logger.error(f"Failed to parse CSV {file_path}: {e}")
+    return data
+
+
+def parse_csv_by_date(file_path: str) -> dict:
     """
-    Convenience function to send the daily cleaning reports via Comms Centre.
+    Parse CSV and group entries by date, sorted chronologically (nearest first).
+    Returns: { 'Sunday, 4 January 2026': [entries...], ... }
+    """
+    from datetime import datetime
+    from collections import defaultdict
+    
+    entries = parse_csv(file_path)
+    by_date = defaultdict(list)
+    
+    for entry in entries:
+        date_str = entry.get("date", "Unknown")
+        by_date[date_str].append(entry)
+    
+    # Sort dates chronologically (nearest first)
+    def parse_date(date_str):
+        """Parse date string like 'Sunday, 4 January 2026' to datetime."""
+        try:
+            # Remove day name prefix
+            if ", " in date_str:
+                date_str = date_str.split(", ", 1)[1]
+            return datetime.strptime(date_str, "%d %B %Y")
+        except:
+            return datetime.max  # Unknown dates go to end
+    
+    sorted_dates = sorted(by_date.keys(), key=parse_date)
+    
+    return {date: by_date[date] for date in sorted_dates}
+
+def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = None, departures_csv: str = None, report_type: str = "Daily") -> bool:
+    """
+    Convenience function to send the cleaning reports via Comms Centre.
+    report_type: 'Daily' or 'Weekly'
     """
     import csv
     from datetime import datetime, timedelta
     
     current_time = datetime.now()
-    report_date = (current_time + timedelta(days=1))
-    date_str = report_date.strftime("%d %b (%A)")  # e.g. 01 Jan (Thursday)
-    date_short = report_date.strftime("%d/%m/%Y")
     
-    # Helper to parse CSV and get rows
-    def parse_csv(file_path):
-        data = []
-        if not file_path or not os.path.exists(file_path):
-            return data
-            
-        try:
-            with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Filter out empty rows or total/header rows
-                    room = row.get("textBox4", "").strip()
-                    if room and room.lower() not in ["total arrivals:", "total departures:", "daily totals:", ""]:
-                        # Verify it's a real room number (numeric or alphanumeric, not a label)
-                        if room.replace(" ", "").replace("-", "")[:1].isdigit():
-                            data.append({
-                                "room": room,
-                                "room_type": row.get("textBox16", "").strip(),  # Room type/format
-                                "adults": row.get("textBox6", "0"),
-                                "children": row.get("textBox7", "0"),
-                                "infants": row.get("textBox8", "0"),
-                                "time": row.get("textBox10", "").strip(),
-                                "name": row.get("textBox19", "").strip() or "Guest"
-                            })
-        except Exception as e:
-            logger.error(f"Failed to parse CSV {file_path}: {e}")
-        return data
-
+    if report_type == "Weekly":
+        # Next 7 days
+        start_date = current_time.date()
+        end_date = start_date + timedelta(days=6)
+        date_str = f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b')}"
+        date_title = f"Next 7 Days ({date_str})"
+    else:
+        # Tomorrow (default)
+        report_date = (current_time + timedelta(days=1))
+        date_str = report_date.strftime("%d %b (%A)")  # e.g. 01 Jan (Thursday)
+        date_title = f"{date_str}"
+    
     # Parse the files
     arrivals_data = parse_csv(arrivals_csv)
     departures_data = parse_csv(departures_csv)
@@ -197,10 +249,10 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
         html += f"<tr style='background-color: #f2f2f2;'><th style='{params}'>Room</th><th style='{params}'>Type</th><th style='{params}'>Guest</th><th style='{params}'>Guests</th><th style='{params}'>{time_label}</th></tr>"
         
         for r in rows:
-            # Multi-line PAX format
             pax_lines = f"{r['adults']} adults<br>{r['children']} children<br>{r['infants']} infants"
             time_val = r.get('time', '') or '-'
             room_type = r.get('room_type', '') or '-'
+            
             html += f"<tr><td style='{params}'><b>{r['room']}</b></td><td style='{params}'>{room_type}</td><td style='{params}'>{r['name']}</td><td style='{params}'>{pax_lines}</td><td style='{params}'><b>{time_val}</b></td></tr>"
         
         html += "</table>"
@@ -209,11 +261,178 @@ def send_daily_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str
     summary_arr = f"{len(arrivals_data)} checking in"
     summary_dep = f"{len(departures_data)} checking out"
     
-    subject = f"Tomorrow's Cleaning {date_str}: {summary_arr}, {summary_dep}"
+    if report_type == "Weekly":
+        subject = f"Weekly Cleaning Report {date_str}: {summary_arr}, {summary_dep}"
+        intro_text = f"Please find attached the weekly cleaning reports for {date_str}."
+        header_text = f"Weekly Cleaning Schedule ({date_str})"
+        
+        # Group data by date for weekly reports
+        arrivals_by_date = parse_csv_by_date(arrivals_csv)
+        departures_by_date = parse_csv_by_date(departures_csv)
+        
+        # Get all unique dates and sort them
+        all_dates = sorted(
+            set(arrivals_by_date.keys()) | set(departures_by_date.keys()),
+            key=lambda d: datetime.strptime(d.split(", ", 1)[1], "%d %B %Y") if ", " in d else datetime.max
+        )
+        
+        # Build summary table for top of email
+        summary_table_html = """
+        <h3>📅 Weekly Overview</h3>
+        <table style='border-collapse: collapse; width: 100%; font-family: sans-serif; margin-bottom: 20px;'>
+            <tr style='background-color: #2c3e50; color: white;'>
+                <th style='border: 1px solid #ddd; padding: 10px; text-align: left;'>Day</th>
+                <th style='border: 1px solid #ddd; padding: 10px; text-align: left;'>Date</th>
+                <th style='border: 1px solid #ddd; padding: 10px; text-align: center;'>Check-Ins</th>
+                <th style='border: 1px solid #ddd; padding: 10px; text-align: center;'>Check-Outs</th>
+            </tr>
+        """
+        
+        total_arr = 0
+        total_dep = 0
+        for date_full in all_dates:
+            arr_count = len(arrivals_by_date.get(date_full, []))
+            dep_count = len(departures_by_date.get(date_full, []))
+            total_arr += arr_count
+            total_dep += dep_count
+            
+            # Parse day name and date
+            parts = date_full.split(", ", 1)
+            day_name = parts[0] if len(parts) > 1 else ""
+            date_part = parts[1] if len(parts) > 1 else date_full
+            
+            summary_table_html += f"""
+            <tr>
+                <td style='border: 1px solid #ddd; padding: 8px;'><b>{day_name}</b></td>
+                <td style='border: 1px solid #ddd; padding: 8px;'>{date_part}</td>
+                <td style='border: 1px solid #ddd; padding: 8px; text-align: center; color: #27ae60;'><b>{arr_count}</b></td>
+                <td style='border: 1px solid #ddd; padding: 8px; text-align: center; color: #e74c3c;'><b>{dep_count}</b></td>
+            </tr>
+            """
+        
+        # Add totals row
+        summary_table_html += f"""
+            <tr style='background-color: #f8f9fa; font-weight: bold;'>
+                <td colspan='2' style='border: 1px solid #ddd; padding: 10px; text-align: right;'>TOTAL</td>
+                <td style='border: 1px solid #ddd; padding: 10px; text-align: center; color: #27ae60;'>{total_arr}</td>
+                <td style='border: 1px solid #ddd; padding: 10px; text-align: center; color: #e74c3c;'>{total_dep}</td>
+            </tr>
+        </table>
+        """
+        
+        # Build day-by-day sections
+        day_sections_html = ""
+        params = "border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top;"
+        
+        for date_full in all_dates:
+            day_arrivals = arrivals_by_date.get(date_full, [])
+            day_departures = departures_by_date.get(date_full, [])
+            
+            day_sections_html += f"""
+            <div style='margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;'>
+                <h3 style='margin: 0 0 10px 0; color: #2c3e50;'>📆 {date_full}</h3>
+                <p style='margin: 0 0 15px 0; color: #666;'>
+                    <span style='color: #27ae60;'><b>{len(day_arrivals)}</b> Check-Ins</span> &nbsp;|&nbsp; 
+                    <span style='color: #e74c3c;'><b>{len(day_departures)}</b> Check-Outs</span>
+                </p>
+            """
+            
+            # Arrivals table for this day
+            if day_arrivals:
+                day_sections_html += f"""
+                <h4 style='margin: 10px 0 5px 0; color: #27ae60;'>Arrivals (Check-in 2:00 PM)</h4>
+                <table style='border-collapse: collapse; width: 100%; font-family: sans-serif; margin-bottom: 15px;'>
+                    <tr style='background-color: #27ae60; color: white;'>
+                        <th style='{params}'>Room</th>
+                        <th style='{params}'>Type</th>
+                        <th style='{params}'>Guest</th>
+                        <th style='{params}'>Guests</th>
+                    </tr>
+                """
+                for r in day_arrivals:
+                    pax = f"{r['adults']}A / {r['children']}C / {r['infants']}I"
+                    day_sections_html += f"""
+                    <tr>
+                        <td style='{params}'><b>{r['room']}</b></td>
+                        <td style='{params}'>{r.get('room_type', '-')}</td>
+                        <td style='{params}'>{r['name']}</td>
+                        <td style='{params}'>{pax}</td>
+                    </tr>
+                    """
+                day_sections_html += "</table>"
+            else:
+                day_sections_html += "<p style='color: #999; font-style: italic;'>No arrivals</p>"
+            
+            # Departures table for this day
+            if day_departures:
+                day_sections_html += f"""
+                <h4 style='margin: 10px 0 5px 0; color: #e74c3c;'>Departures (Check-out 10:00 AM)</h4>
+                <table style='border-collapse: collapse; width: 100%; font-family: sans-serif;'>
+                    <tr style='background-color: #e74c3c; color: white;'>
+                        <th style='{params}'>Room</th>
+                        <th style='{params}'>Type</th>
+                        <th style='{params}'>Guest</th>
+                        <th style='{params}'>Guests</th>
+                    </tr>
+                """
+                for r in day_departures:
+                    pax = f"{r['adults']}A / {r['children']}C / {r['infants']}I"
+                    day_sections_html += f"""
+                    <tr>
+                        <td style='{params}'><b>{r['room']}</b></td>
+                        <td style='{params}'>{r.get('room_type', '-')}</td>
+                        <td style='{params}'>{r['name']}</td>
+                        <td style='{params}'>{pax}</td>
+                    </tr>
+                    """
+                day_sections_html += "</table>"
+            else:
+                day_sections_html += "<p style='color: #999; font-style: italic;'>No departures</p>"
+            
+            day_sections_html += "</div>"
+        
+        html_body = f"""
+        <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+            <h2 style="color: #2c3e50;">{header_text}</h2>
+            
+            {summary_table_html}
+            
+            <hr style="border: 0; border-top: 2px solid #3498db; margin: 25px 0;">
+            
+            <h2 style="color: #2c3e50;">📋 Day-by-Day Details</h2>
+            {day_sections_html}
+            
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 0.9em; color: #777;"><i>Attached: PDF Reports (Official)</i></p>
+        </div>
+        """
+    else:
+        subject = f"Tomorrow's Cleaning {date_str}: {summary_arr}, {summary_dep}"
+        intro_text = f"Please find attached the cleaning reports for {date_str}."
+        header_text = f"Cleaning Reports for {date_str}"
+        
+        html_body = f"""
+        <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+            <h2 style="color: #2c3e50;">{header_text}</h2>
+            
+            <div style="margin-bottom: 20px; padding: 15px; background-color: #e8f4fd; border-radius: 5px;">
+                <strong>Summary:</strong><br>
+                Checking In: <b>{len(arrivals_data)}</b> rooms<br>
+                Checking Out: <b>{len(departures_data)}</b> rooms
+            </div>
+
+            {make_table("Arrivals", arrivals_data, time_label="Check-in")}
+            <br>
+            {make_table("Departures", departures_data, time_label="Check-out")}
+            
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 0.9em; color: #777;"><i>Attached: PDF Reports (Official)</i></p>
+        </div>
+        """
     
     body = f"""Hi,
 
-Please find attached the cleaning reports for {date_str}.
+{intro_text}
 
 Summary:
 - Arrivals: {summary_arr}
@@ -222,25 +441,6 @@ Summary:
 See the email content for the detailed list.
 
 """
-
-    html_body = f"""
-    <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2c3e50;">Cleaning Reports for {date_str}</h2>
-        
-        <div style="margin-bottom: 20px; padding: 15px; background-color: #e8f4fd; border-radius: 5px;">
-            <strong>Summary:</strong><br>
-            Checking In: <b>{len(arrivals_data)}</b> rooms<br>
-            Checking Out: <b>{len(departures_data)}</b> rooms
-        </div>
-
-        {make_table("Arrivals", arrivals_data, time_label="Check-in")}
-        <br>
-        {make_table("Departures", departures_data, time_label="Check-out")}
-        
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 0.9em; color: #777;"><i>Attached: PDF Reports (Official)</i></p>
-    </div>
-    """
     
     # Attachments: PDFs ONLY
     attachments = []
@@ -254,11 +454,11 @@ See the email content for the detailed list.
     # === STEP 2: SMS Summary to Sender (if configured) ===
     sms_success = False
     if SMS_SENDER_NOTIFY:
-        sms_body = f"Tomorrow's Cleaning {date_str}: {summary_arr}, {summary_dep}. Check your email for details."
+        sms_body = f"{report_type} Cleaning {date_str}: {summary_arr}, {summary_dep}. Check email."
         sms_success = send_sms_notification(SMS_SENDER_NOTIFY, sms_body)
     
     # === STEP 3: Telegram Delivery Report ===
-    telegram_report = f"📊 Report Delivery Status for {date_str}:\n"
+    telegram_report = f"📊 {report_type} Report Delivery for {date_str}:\n"
     telegram_report += f"• Email: {'✅ Sent' if email_success else '❌ FAILED'}\n"
     if SMS_SENDER_NOTIFY:
         telegram_report += f"• SMS to Sender: {'✅ Sent' if sms_success else '❌ FAILED'}\n"
