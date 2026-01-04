@@ -782,6 +782,28 @@ def run_weekly_report():
         except Exception as alert_err:
             logger.error(f"Failed to send failure alert: {alert_err}")
 
+def run_daily_status_check():
+    """
+    Daily heartbeat notification via Telegram at 9 PM.
+    """
+    logger.info("Running daily status check...")
+    try:
+        from api_email_sender import send_telegram_notification
+        from datetime import datetime
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        msg = f"✅ Automation Status Check\nTime: {now_str}\nStatus: Running correctly"
+        
+        if send_telegram_notification(msg):
+            logger.info("✓ Daily status notification sent via Telegram.")
+        else:
+            logger.warning("Failed to send daily status notification.")
+            
+    except ImportError:
+        logger.error("Could not import send_telegram_notification from api_email_sender")
+    except Exception as e:
+        logger.error(f"Error sending daily status: {e}")
+
+
 
 def heartbeat_check():
     """
@@ -1155,6 +1177,10 @@ def main():
     logger.info("Scheduling weekly report every Saturday at 10:00")
     schedule.every().saturday.at("10:00").do(run_weekly_report)
     
+    # Daily Status Check (Telegram) at 9:00 PM
+    logger.info("Scheduling daily status check at 21:00")
+    schedule.every().day.at("21:00").do(run_daily_status_check)
+    
     # Heartbeat check every 30 minutes to keep session alive and verify authentication
     logger.info("Scheduling heartbeat check every 30 minutes")
     schedule.every(30).minutes.do(heartbeat_check)
@@ -1177,6 +1203,13 @@ def main():
     logger.info("4. Type 'run_d' for daily report, 'run_w' for weekly report")
     logger.info("5. Press Ctrl+C to exit")
     logger.info("Automation engine started.")
+
+    # Send startup notification
+    try: 
+        from api_email_sender import send_telegram_notification
+        send_telegram_notification("🚀 Automation is Live\nSystem initialized and ready.")
+    except Exception as e:
+        logger.warning(f"Failed to send startup notification: {e}")
 
     # Setup background thread to listen for manual trigger commands
     stop_event = threading.Event()
