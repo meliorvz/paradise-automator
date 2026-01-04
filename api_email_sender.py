@@ -23,6 +23,7 @@ EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
 EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
 SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
 ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61402526638")  # Default from user
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Numeric Telegram Chat ID
 
 
 def encode_file_base64(file_path: str) -> str:
@@ -508,9 +509,14 @@ def send_telegram_notification(message: str) -> bool:
     if not API_KEY:
         logger.error("API key not configured for Telegram")
         return False
+    
+    if not TELEGRAM_CHAT_ID:
+        logger.warning("TELEGRAM_CHAT_ID not configured, skipping Telegram notification")
+        return False
         
     payload = {
         "channels": ["telegram"],
+        "to": [TELEGRAM_CHAT_ID],
         "body": message
     }
     
