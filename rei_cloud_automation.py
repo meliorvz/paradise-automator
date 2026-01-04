@@ -76,6 +76,12 @@ SCHEDULED_RUN_HOUR = 6
 SCHEDULED_RUN_MINUTE = 1
 GRACE_PERIOD_MINUTES = 10
 
+# Weekly schedule configuration
+WEEKLY_SCHEDULED_DAY = 5  # Saturday (Monday=0, Sunday=6)
+WEEKLY_SCHEDULED_HOUR = 10
+WEEKLY_SCHEDULED_MINUTE = 0
+WEEKLY_GRACE_PERIOD_MINUTES = 10
+
 
 def load_state():
     """Load the automation state."""
@@ -113,6 +119,26 @@ def get_next_scheduled_time(from_time=None):
     return next_run.isoformat()
 
 
+def get_next_weekly_scheduled_time(from_time=None):
+    """
+    Calculate the next weekly scheduled run time (next Saturday at 10:00).
+    Returns ISO format string.
+    """
+    if from_time is None:
+        from_time = datetime.now()
+    
+    # Find days until next Saturday
+    days_ahead = WEEKLY_SCHEDULED_DAY - from_time.weekday()
+    if days_ahead <= 0:  # Target day already passed this week
+        days_ahead += 7
+    
+    next_saturday = from_time.date() + timedelta(days=days_ahead)
+    next_run = datetime.combine(next_saturday, datetime.min.time().replace(
+        hour=WEEKLY_SCHEDULED_HOUR, minute=WEEKLY_SCHEDULED_MINUTE
+    ))
+    return next_run.isoformat()
+
+
 def save_successful_run():
     """
     Record a successful run. Updates last_successful_run and calculates next_expected_run.
@@ -124,6 +150,19 @@ def save_successful_run():
     state["next_expected_run"] = get_next_scheduled_time(now)
     save_state(state)
     logger.info(f"State saved: last_successful_run={now.isoformat()}, next_expected_run={state['next_expected_run']}")
+
+
+def save_successful_weekly_run():
+    """
+    Record a successful weekly run. Updates last_successful_weekly_run and 
+    calculates next_expected_weekly_run. Called after ANY successful weekly run.
+    """
+    now = datetime.now()
+    state = load_state()
+    state["last_successful_weekly_run"] = now.isoformat()
+    state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(now)
+    save_state(state)
+    logger.info(f"Weekly state saved: last_successful_weekly_run={now.isoformat()}, next_expected_weekly_run={state['next_expected_weekly_run']}")
 
 
 def init_state_if_needed():
@@ -166,6 +205,40 @@ def init_state_if_needed():
     return state
 
 
+def init_weekly_state_if_needed():
+    """
+    Initialize weekly state on startup if next_expected_weekly_run is missing.
+    Sets next_expected_weekly_run to this Saturday if before that time,
+    or next Saturday if after.
+    """
+    state = load_state()
+    
+    if "next_expected_weekly_run" not in state:
+        now = datetime.now()
+        
+        # Calculate this Saturday
+        days_until_saturday = WEEKLY_SCHEDULED_DAY - now.weekday()
+        if days_until_saturday < 0:  
+            days_until_saturday += 7
+        
+        this_saturday = now.date() + timedelta(days=days_until_saturday)
+        this_saturday_scheduled = datetime.combine(this_saturday, datetime.min.time().replace(
+            hour=WEEKLY_SCHEDULED_HOUR, minute=WEEKLY_SCHEDULED_MINUTE
+        ))
+        
+        if now < this_saturday_scheduled:
+            # Before this Saturday's run time - set deadline to this Saturday
+            state["next_expected_weekly_run"] = this_saturday_scheduled.isoformat()
+        else:
+            # After this Saturday's run time - set deadline to next Saturday
+            state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(now)
+        
+        save_state(state)
+        logger.info(f"Initialized weekly state with next_expected_weekly_run={state['next_expected_weekly_run']}")
+    
+    return state
+
+
 def is_past_deadline():
     """
     Check if current time is past the deadline (next_expected_run + grace period).
@@ -192,6 +265,35 @@ def is_past_deadline():
         return is_past, next_run_dt, last_success_dt
     except Exception as e:
         logger.error(f"Error parsing state timestamps: {e}")
+        return False, None, None
+
+
+def is_past_weekly_deadline():
+    """
+    Check if current time is past the weekly deadline (next_expected_weekly_run + grace period).
+    Returns (is_past, next_expected_run_dt, last_successful_run_dt)
+    """
+    state = load_state()
+    next_run_str = state.get("next_expected_weekly_run")
+    last_success_str = state.get("last_successful_weekly_run")
+    
+    if not next_run_str:
+        return False, None, None
+    
+    try:
+        next_run_dt = datetime.fromisoformat(next_run_str)
+        deadline = next_run_dt + timedelta(minutes=WEEKLY_GRACE_PERIOD_MINUTES)
+        
+        last_success_dt = None
+        if last_success_str:
+            last_success_dt = datetime.fromisoformat(last_success_str)
+        
+        now = datetime.now()
+        is_past = now > deadline
+        
+        return is_past, next_run_dt, last_success_dt
+    except Exception as e:
+        logger.error(f"Error parsing weekly state timestamps: {e}")
         return False, None, None
 
 
@@ -656,6 +758,9 @@ def run_weekly_report():
             logger.info("Sending weekly reports via email API...")
             if send_reports(arrivals_pdf, departures_pdf, arrivals_csv, departures_csv, report_type="Weekly"):
                 logger.info("✓ Weekly email sent successfully!")
+                
+                # Save state on success (for weekly watchdog)
+                save_successful_weekly_run()
             else:
                 logger.warning("Weekly email sending failed or not configured.")
         except ImportError:
@@ -1082,9 +1187,13 @@ def main():
 
     # Initialize state if needed (sets next_expected_run)
     init_state_if_needed()
+    init_weekly_state_if_needed()
     
     alert_sent_for_current_deadline = False
     current_deadline_str = None  # Track which deadline we've alerted for
+
+    weekly_alert_sent_for_current_deadline = False
+    current_weekly_deadline_str = None  # Track which weekly deadline we've alerted for
 
     # Main Loop
     try:
@@ -1122,6 +1231,37 @@ def main():
                     else:
                         # We already have a successful run for this deadline, just set flag
                         alert_sent_for_current_deadline = True
+
+            # Weekly Watchdog: Check for missed weekly run using deadline-based logic
+            is_past_weekly, next_expected_weekly_dt, last_weekly_success_dt = is_past_weekly_deadline()
+
+            if is_past_weekly and next_expected_weekly_dt:
+                weekly_deadline_str = next_expected_weekly_dt.isoformat()
+                
+                # Reset alert flag when deadline changes (new week)
+                if weekly_deadline_str != current_weekly_deadline_str:
+                    current_weekly_deadline_str = weekly_deadline_str
+                    weekly_alert_sent_for_current_deadline = False
+                
+                # Check if we should alert
+                if not weekly_alert_sent_for_current_deadline:
+                    # No successful run before this deadline?
+                    missed_weekly_run = (last_weekly_success_dt is None) or (last_weekly_success_dt < next_expected_weekly_dt)
+                    
+                    if missed_weekly_run:
+                        weekly_alert_sent_for_current_deadline = True
+                        now = datetime.now()
+                        msg = f"MISSED WEEKLY SCHEDULED RUN. Expected by: {next_expected_weekly_dt.strftime('%Y-%m-%d %H:%M')} (Saturday). Current time: {now.strftime('%Y-%m-%d %H:%M')}. Please check server."
+                        logger.warning(msg)
+                        
+                        try:
+                            from api_email_sender import send_failure_alert
+                            send_failure_alert(msg)
+                        except Exception as ex:
+                            logger.error(f"Failed to send missed weekly run alert: {ex}")
+                    else:
+                        # We already have a successful run for this deadline, just set flag
+                        weekly_alert_sent_for_current_deadline = True
 
             # Handle manual daily trigger
             if trigger_daily_event.is_set():

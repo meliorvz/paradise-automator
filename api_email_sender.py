@@ -341,7 +341,7 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
             # Arrivals table for this day
             if day_arrivals:
                 day_sections_html += f"""
-                <h4 style='margin: 10px 0 5px 0; color: #27ae60;'>Arrivals (Check-in 2:00 PM)</h4>
+                <h4 style='margin: 10px 0 5px 0; color: #27ae60;'>Arrivals</h4>
                 <table style='border-collapse: collapse; width: 100%; font-family: sans-serif; margin-bottom: 15px;'>
                     <tr style='background-color: #27ae60; color: white;'>
                         <th style='{params}'>Room</th>
@@ -367,7 +367,7 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
             # Departures table for this day
             if day_departures:
                 day_sections_html += f"""
-                <h4 style='margin: 10px 0 5px 0; color: #e74c3c;'>Departures (Check-out 10:00 AM)</h4>
+                <h4 style='margin: 10px 0 5px 0; color: #e74c3c;'>Departures</h4>
                 <table style='border-collapse: collapse; width: 100%; font-family: sans-serif;'>
                     <tr style='background-color: #e74c3c; color: white;'>
                         <th style='{params}'>Room</th>
