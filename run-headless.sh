@@ -6,7 +6,7 @@
 # Uses xvfb-run to create a virtual display for the browser.
 #
 # Usage:
-#   ./run-headless.sh              # Production (daily at 06:01, weekly Sat 10:00)
+#   ./run-headless.sh              # Production (daily at 13:00, weekly Sat 08:00)
 #   ./run-headless.sh --test       # Test mode (every 5 minutes)
 #   ./run-headless.sh --run-now    # Run daily report immediately then schedule
 #   ./run-headless.sh --run-weekly # Run weekly report immediately then schedule

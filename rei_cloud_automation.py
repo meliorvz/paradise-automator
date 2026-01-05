@@ -72,13 +72,13 @@ def cleanup(signum=None, frame=None):
 STATE_FILE = "automation_state.json"
 
 # Schedule configuration
-SCHEDULED_RUN_HOUR = 6
-SCHEDULED_RUN_MINUTE = 1
+SCHEDULED_RUN_HOUR = 13
+SCHEDULED_RUN_MINUTE = 0
 GRACE_PERIOD_MINUTES = 10
 
 # Weekly schedule configuration
 WEEKLY_SCHEDULED_DAY = 5  # Saturday (Monday=0, Sunday=6)
-WEEKLY_SCHEDULED_HOUR = 10
+WEEKLY_SCHEDULED_HOUR = 8
 WEEKLY_SCHEDULED_MINUTE = 0
 WEEKLY_GRACE_PERIOD_MINUTES = 10
 
@@ -121,7 +121,7 @@ def get_next_scheduled_time(from_time=None):
 
 def get_next_weekly_scheduled_time(from_time=None):
     """
-    Calculate the next weekly scheduled run time (next Saturday at 10:00).
+    Calculate the next weekly scheduled run time (next Saturday at 08:00).
     Returns ISO format string.
     """
     if from_time is None:
@@ -1170,12 +1170,12 @@ def main():
         logger.info("Scheduling report every 5 minutes")
         schedule.every(5).minutes.do(run_daily_report)
     else:
-        logger.info("Scheduling report daily at 06:01")
-        schedule.every().day.at("06:01").do(run_daily_report)
+        logger.info("Scheduling report daily at 13:00")
+        schedule.every().day.at("13:00").do(run_daily_report)
     
-    # Weekly report every Saturday at 10:00 AM
-    logger.info("Scheduling weekly report every Saturday at 10:00")
-    schedule.every().saturday.at("10:00").do(run_weekly_report)
+    # Weekly report every Saturday at 08:00 AM
+    logger.info("Scheduling weekly report every Saturday at 08:00")
+    schedule.every().saturday.at("08:00").do(run_weekly_report)
     
     # Daily Status Check (Telegram) at 9:00 PM
     logger.info("Scheduling daily status check at 21:00")
@@ -1198,7 +1198,7 @@ def main():
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
     logger.info(f"1. Daily report scheduled at {SCHEDULED_RUN_HOUR:02d}:{SCHEDULED_RUN_MINUTE:02d}")
-    logger.info("2. Weekly report scheduled every Saturday at 10:00")
+    logger.info("2. Weekly report scheduled every Saturday at 08:00")
     logger.info("3. Heartbeat check every 30 minutes (keeps session alive)")
     logger.info("4. Type 'run_d' for daily report, 'run_w' for weekly report")
     logger.info("5. Press Ctrl+C to exit")

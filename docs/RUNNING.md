@@ -202,7 +202,7 @@ screen -X -S bot quit
 
 | Option | Description |
 |--------|-------------|
-| (none) | Production mode - daily at 06:01, weekly on Saturdays at 10:00 |
+| (none) | Production mode - daily at 13:00, weekly on Saturdays at 08:00 |
 | `--test` | Test mode - runs report every 5 minutes |
 | `--run-now` | Run daily report immediately, then continue with schedule |
 | `--run-weekly` | Run weekly report immediately, then continue with schedule |
@@ -212,8 +212,8 @@ screen -X -S bot quit
 
 | Report | Schedule | Email Content |
 |--------|----------|---------------|
-| Daily | 06:01 every day | Tomorrow's arrivals/departures |
-| Weekly | 10:00 every Saturday | Next 7 days, day-by-day summary for cleaning company planning |
+| Daily | 13:00 every day | Tomorrow's arrivals/departures |
+| Weekly | 08:00 every Saturday | Next 7 days, day-by-day summary for cleaning company planning |
 
 ### Manual Triggers (while bot is running)
 
@@ -227,7 +227,7 @@ Type these commands while the bot is running to manually trigger reports:
 ### Examples
 
 ```bash
-# Production mode (daily at 06:01, weekly Saturdays at 10:00)
+# Production mode (daily at 13:00, weekly Saturdays at 08:00)
 ./run-headless.sh
 
 # Run daily report immediately, then continue schedule
