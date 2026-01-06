@@ -473,15 +473,21 @@ See the email content for the detailed list.
     return email_success
 
 
-def send_sms_notification(to_phone: str, message: str) -> bool:
-    """Send an SMS notification."""
+def send_sms_notification(to_phones: str, message: str) -> bool:
+    """Send an SMS notification to one or more phones (comma-separated)."""
     if not API_KEY:
         logger.error("API key not configured for SMS")
+        return False
+    
+    # Split comma-separated phone numbers into a list
+    phone_list = [p.strip() for p in to_phones.split(",") if p.strip()]
+    if not phone_list:
+        logger.error("No valid phone numbers provided for SMS")
         return False
         
     payload = {
         "channels": ["sms"],
-        "to": [to_phone],
+        "to": phone_list,
         "body": message
     }
     
@@ -491,7 +497,7 @@ def send_sms_notification(to_phone: str, message: str) -> bool:
     }
     
     try:
-        logger.info(f"Sending SMS to {to_phone}...")
+        logger.info(f"Sending SMS to {phone_list}...")
         response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
         if response.status_code == 200 and response.json().get("success"):
             logger.info("✓ SMS sent successfully")
@@ -547,46 +553,67 @@ def send_failure_alert(error_message: str) -> bool:
         logger.error("COMMS_API_KEY not configured")
         return False
 
-    subject = "🚨 CRITICAL: REI Automation FAILED"
-    body = f"URGENT: The REI Automation script failed to run.\n\nError: {error_message}\n\nPlease check the server immediately."
-    
-    # User requested SMS to specific number + Telegram
-    # Assuming Telegram uses default integration recipients if no numeric ID provided
-    recipients = [ESCALATION_PHONE]
-    
-    payload = {
-        "channels": ["sms", "telegram"],
-        "to": recipients,
-        "body": body
-    }
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    body = f"🚨 URGENT: REI Automation FAILED\n\nError: {error_message}\n\nPlease check the server immediately."
     
     headers = {
         "x-integration-key": API_KEY,
         "Content-Type": "application/json"
     }
     
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-
-    try:
-        logger.warning(f"Sending FAILURE ALERT to {recipients} via SMS/Telegram...")
-        
-        session = requests.Session()
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-        session.mount("https://", HTTPAdapter(max_retries=retry))
-        
-        response = session.post(API_URL, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 200 and response.json().get("success"):
-            logger.info("✓ Failure alert sent successfully.")
-            return True
-        else:
-            logger.error(f"Failed to send failure alert: {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error sending failure alert: {e}")
-        return False
+    # Setup session with retry
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    
+    # Split comma-separated escalation phones into a list
+    escalation_phones = [p.strip() for p in ESCALATION_PHONE.split(",") if p.strip()]
+    
+    # Build recipients list: phones for SMS, chat ID for Telegram
+    sms_recipients = escalation_phones if escalation_phones else []
+    telegram_recipients = [TELEGRAM_CHAT_ID] if TELEGRAM_CHAT_ID else []
+    
+    logger.warning(f"Sending FAILURE ALERT via SMS to {sms_recipients}, Telegram to {telegram_recipients}...")
+    
+    # Send SMS if we have phone numbers
+    sms_success = False
+    if sms_recipients:
+        sms_payload = {
+            "channels": ["sms"],
+            "to": sms_recipients,
+            "body": body
+        }
+        try:
+            response = session.post(API_URL, json=sms_payload, headers=headers, timeout=30)
+            sms_success = response.status_code == 200 and response.json().get("success")
+            if sms_success:
+                logger.info(f"✓ SMS escalation sent to {len(sms_recipients)} recipient(s)")
+            else:
+                logger.error(f"SMS escalation failed: {response.text}")
+        except Exception as e:
+            logger.error(f"SMS escalation error: {e}")
+    
+    # Send Telegram if configured
+    telegram_success = False
+    if telegram_recipients:
+        telegram_payload = {
+            "channels": ["telegram"],
+            "to": telegram_recipients,
+            "body": body
+        }
+        try:
+            response = session.post(API_URL, json=telegram_payload, headers=headers, timeout=30)
+            telegram_success = response.status_code == 200 and response.json().get("success")
+            if telegram_success:
+                logger.info("✓ Telegram escalation sent")
+            else:
+                logger.error(f"Telegram escalation failed: {response.text}")
+        except Exception as e:
+            logger.error(f"Telegram escalation error: {e}")
+    
+    return sms_success or telegram_success
 
 
 if __name__ == "__main__":
