@@ -239,6 +239,13 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
     arrivals_data = parse_csv(arrivals_csv)
     departures_data = parse_csv(departures_csv)
     
+    # Helper to separate Mantra rooms from others
+    def separate_mantra(rows):
+        """Separate rooms into (non-Mantra, Mantra) lists."""
+        mantra = [r for r in rows if 'mantra' in r.get('room', '').lower()]
+        other = [r for r in rows if 'mantra' not in r.get('room', '').lower()]
+        return other, mantra
+    
     # Generate HTML Tables with time column and room type
     def make_table(title, rows, time_label="Time"):
         if not rows:
@@ -329,30 +336,36 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
             day_arrivals = arrivals_by_date.get(date_full, [])
             day_departures = departures_by_date.get(date_full, [])
             
+            # Separate Mantra rooms
+            dep_other, dep_mantra = separate_mantra(day_departures)
+            arr_other, arr_mantra = separate_mantra(day_arrivals)
+            
             day_sections_html += f"""
             <div style='margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;'>
                 <h3 style='margin: 0 0 10px 0; color: #2c3e50;'>📆 {date_full}</h3>
                 <p style='margin: 0 0 15px 0; color: #666;'>
-                    <span style='color: #27ae60;'><b>{len(day_arrivals)}</b> Check-Ins</span> &nbsp;|&nbsp; 
-                    <span style='color: #e74c3c;'><b>{len(day_departures)}</b> Check-Outs</span>
+                    <span style='color: #e74c3c;'><b>{len(day_departures)}</b> Check-Outs</span> &nbsp;|&nbsp;
+                    <span style='color: #27ae60;'><b>{len(day_arrivals)}</b> Check-Ins</span>
                 </p>
             """
             
-            # Arrivals table for this day
-            if day_arrivals:
-                day_sections_html += f"""
-                <h4 style='margin: 10px 0 5px 0; color: #27ae60;'>Arrivals</h4>
+            # Helper to render a section table
+            def render_section_table(rows, header_color, section_title):
+                if not rows:
+                    return ""
+                html = f"""
+                <h4 style='margin: 10px 0 5px 0; color: {header_color};'>{section_title}</h4>
                 <table style='border-collapse: collapse; width: 100%; font-family: sans-serif; margin-bottom: 15px;'>
-                    <tr style='background-color: #27ae60; color: white;'>
+                    <tr style='background-color: {header_color}; color: white;'>
                         <th style='{params}'>Room</th>
                         <th style='{params}'>Type</th>
                         <th style='{params}'>Guest</th>
                         <th style='{params}'>Guests</th>
                     </tr>
                 """
-                for r in day_arrivals:
+                for r in rows:
                     pax = f"{r['adults']}A / {r['children']}C / {r['infants']}I"
-                    day_sections_html += f"""
+                    html += f"""
                     <tr>
                         <td style='{params}'><b>{r['room']}</b></td>
                         <td style='{params}'>{r.get('room_type', '-')}</td>
@@ -360,35 +373,26 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
                         <td style='{params}'>{pax}</td>
                     </tr>
                     """
-                day_sections_html += "</table>"
-            else:
-                day_sections_html += "<p style='color: #999; font-style: italic;'>No arrivals</p>"
+                html += "</table>"
+                return html
             
-            # Departures table for this day
-            if day_departures:
-                day_sections_html += f"""
-                <h4 style='margin: 10px 0 5px 0; color: #e74c3c;'>Departures</h4>
-                <table style='border-collapse: collapse; width: 100%; font-family: sans-serif;'>
-                    <tr style='background-color: #e74c3c; color: white;'>
-                        <th style='{params}'>Room</th>
-                        <th style='{params}'>Type</th>
-                        <th style='{params}'>Guest</th>
-                        <th style='{params}'>Guests</th>
-                    </tr>
-                """
-                for r in day_departures:
-                    pax = f"{r['adults']}A / {r['children']}C / {r['infants']}I"
-                    day_sections_html += f"""
-                    <tr>
-                        <td style='{params}'><b>{r['room']}</b></td>
-                        <td style='{params}'>{r.get('room_type', '-')}</td>
-                        <td style='{params}'>{r['name']}</td>
-                        <td style='{params}'>{pax}</td>
-                    </tr>
-                    """
-                day_sections_html += "</table>"
-            else:
+            # Order: Departures (non-Mantra) → Departures (Mantra) → Arrivals (non-Mantra) → Arrivals (Mantra)
+            if dep_other:
+                day_sections_html += render_section_table(dep_other, '#e74c3c', 'Departures')
+            if dep_mantra:
+                day_sections_html += render_section_table(dep_mantra, '#e74c3c', 'Departures (Mantra)')
+            if arr_other:
+                day_sections_html += render_section_table(arr_other, '#27ae60', 'Arrivals')
+            if arr_mantra:
+                day_sections_html += render_section_table(arr_mantra, '#27ae60', 'Arrivals (Mantra)')
+            
+            # Show message if no departures at all
+            if not day_departures:
                 day_sections_html += "<p style='color: #999; font-style: italic;'>No departures</p>"
+            
+            # Show message if no arrivals at all
+            if not day_arrivals:
+                day_sections_html += "<p style='color: #999; font-style: italic;'>No arrivals</p>"
             
             day_sections_html += "</div>"
         
@@ -412,19 +416,32 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
         intro_text = f"Please find attached the cleaning reports for {date_str}."
         header_text = f"Cleaning Reports for {date_str}"
         
+        # Separate Mantra rooms for daily report
+        dep_other, dep_mantra = separate_mantra(departures_data)
+        arr_other, arr_mantra = separate_mantra(arrivals_data)
+        
+        # Build tables in order: Departures (non-Mantra) → Departures (Mantra) → Arrivals (non-Mantra) → Arrivals (Mantra)
+        tables_html = ""
+        if dep_other:
+            tables_html += make_table("Departures", dep_other, time_label="Check-out") + "<br>"
+        if dep_mantra:
+            tables_html += make_table("Departures (Mantra)", dep_mantra, time_label="Check-out") + "<br>"
+        if arr_other:
+            tables_html += make_table("Arrivals", arr_other, time_label="Check-in") + "<br>"
+        if arr_mantra:
+            tables_html += make_table("Arrivals (Mantra)", arr_mantra, time_label="Check-in")
+        
         html_body = f"""
         <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
             <h2 style="color: #2c3e50;">{header_text}</h2>
             
             <div style="margin-bottom: 20px; padding: 15px; background-color: #e8f4fd; border-radius: 5px;">
                 <strong>Summary:</strong><br>
-                Checking In: <b>{len(arrivals_data)}</b> rooms<br>
-                Checking Out: <b>{len(departures_data)}</b> rooms
+                Checking Out: <b>{len(departures_data)}</b> rooms<br>
+                Checking In: <b>{len(arrivals_data)}</b> rooms
             </div>
 
-            {make_table("Arrivals", arrivals_data, time_label="Check-in")}
-            <br>
-            {make_table("Departures", departures_data, time_label="Check-out")}
+            {tables_html}
             
             <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
             <p style="font-size: 0.9em; color: #777;"><i>Attached: PDF Reports (Official)</i></p>
