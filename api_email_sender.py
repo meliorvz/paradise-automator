@@ -472,7 +472,19 @@ See the email content for the detailed list.
     # === STEP 2: SMS Summary to Sender (if configured) ===
     sms_success = False
     if SMS_SENDER_NOTIFY:
-        sms_body = f"{report_type} Cleaning {date_str}: {summary_arr}, {summary_dep}. Check email."
+        if report_type == "Weekly":
+            # Build per-day breakdown for weekly SMS
+            sms_lines = [f"Weekly Cleaning {date_str}:"]
+            for date_full in all_dates:
+                arr_count = len(arrivals_by_date.get(date_full, []))
+                dep_count = len(departures_by_date.get(date_full, []))
+                # Extract short day name (e.g., "Sun" from "Sunday, 4 January 2026")
+                day_short = date_full.split(",")[0][:3] if "," in date_full else date_full[:3]
+                sms_lines.append(f"{day_short}: {arr_count} arr / {dep_count} dep")
+            sms_lines.append(f"Total: {total_arr} arr / {total_dep} dep")
+            sms_body = "\n".join(sms_lines)
+        else:
+            sms_body = f"{report_type} Cleaning {date_str}: {summary_arr}, {summary_dep}. Check email."
         sms_success = send_sms_notification(SMS_SENDER_NOTIFY, sms_body)
     
     # === STEP 3: Telegram Delivery Report ===
