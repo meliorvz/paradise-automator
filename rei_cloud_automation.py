@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytz
 import schedule
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -71,12 +72,17 @@ def cleanup(signum=None, frame=None):
 # State File for tracking successful runs
 STATE_FILE = "automation_state.json"
 
-# Schedule configuration
+# Brisbane timezone for scheduling (handles AEST/AEDT automatically)
+BRISBANE_TZ = pytz.timezone('Australia/Brisbane')
+
+# Schedule configuration (in Brisbane local time)
+# Daily at 13:00 Brisbane time (handles DST automatically)
 SCHEDULED_RUN_HOUR = 13
 SCHEDULED_RUN_MINUTE = 0
 GRACE_PERIOD_MINUTES = 10
 
-# Weekly schedule configuration
+# Weekly schedule configuration (in Brisbane local time)
+# Saturday at 08:00 Brisbane time (handles DST automatically)
 WEEKLY_SCHEDULED_DAY = 5  # Saturday (Monday=0, Sunday=6)
 WEEKLY_SCHEDULED_HOUR = 8
 WEEKLY_SCHEDULED_MINUTE = 0
@@ -105,38 +111,58 @@ def save_state(state):
 
 def get_next_scheduled_time(from_time=None):
     """
-    Calculate the next scheduled run time (tomorrow at SCHEDULED_RUN_HOUR:SCHEDULED_RUN_MINUTE).
-    Returns ISO format string.
+    Calculate the next scheduled run time (tomorrow at SCHEDULED_RUN_HOUR:SCHEDULED_RUN_MINUTE Brisbane time).
+    Returns ISO format string in UTC for storage.
     """
+    # Use current time in Brisbane timezone
     if from_time is None:
-        from_time = datetime.now()
+        brisbane_now = datetime.now(BRISBANE_TZ)
+    else:
+        # Ensure from_time is timezone-aware in Brisbane
+        if from_time.tzinfo is None:
+            brisbane_now = BRISBANE_TZ.localize(from_time)
+        else:
+            brisbane_now = from_time.astimezone(BRISBANE_TZ)
     
-    # Next run is tomorrow at the scheduled time
-    tomorrow = from_time.date() + timedelta(days=1)
-    next_run = datetime.combine(tomorrow, datetime.min.time().replace(
+    # Next run is tomorrow at the scheduled time (Brisbane time)
+    tomorrow = brisbane_now.date() + timedelta(days=1)
+    next_run_brisbane = BRISBANE_TZ.localize(datetime.combine(tomorrow, datetime.min.time().replace(
         hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE
-    ))
-    return next_run.isoformat()
+    )))
+    
+    # Convert to UTC for storage
+    next_run_utc = next_run_brisbane.astimezone(pytz.UTC)
+    return next_run_utc.isoformat()
 
 
 def get_next_weekly_scheduled_time(from_time=None):
     """
-    Calculate the next weekly scheduled run time (next Saturday at 08:00).
-    Returns ISO format string.
+    Calculate the next weekly scheduled run time (next Saturday at 08:00 Brisbane time).
+    Returns ISO format string in UTC for storage.
     """
+    # Use current time in Brisbane timezone
     if from_time is None:
-        from_time = datetime.now()
+        brisbane_now = datetime.now(BRISBANE_TZ)
+    else:
+        # Ensure from_time is timezone-aware in Brisbane
+        if from_time.tzinfo is None:
+            brisbane_now = BRISBANE_TZ.localize(from_time)
+        else:
+            brisbane_now = from_time.astimezone(BRISBANE_TZ)
     
     # Find days until next Saturday
-    days_ahead = WEEKLY_SCHEDULED_DAY - from_time.weekday()
+    days_ahead = WEEKLY_SCHEDULED_DAY - brisbane_now.weekday()
     if days_ahead <= 0:  # Target day already passed this week
         days_ahead += 7
     
-    next_saturday = from_time.date() + timedelta(days=days_ahead)
-    next_run = datetime.combine(next_saturday, datetime.min.time().replace(
+    next_saturday = brisbane_now.date() + timedelta(days=days_ahead)
+    next_run_brisbane = BRISBANE_TZ.localize(datetime.combine(next_saturday, datetime.min.time().replace(
         hour=WEEKLY_SCHEDULED_HOUR, minute=WEEKLY_SCHEDULED_MINUTE
-    ))
-    return next_run.isoformat()
+    )))
+    
+    # Convert to UTC for storage
+    next_run_utc = next_run_brisbane.astimezone(pytz.UTC)
+    return next_run_utc.isoformat()
 
 
 def save_successful_run():
@@ -144,7 +170,7 @@ def save_successful_run():
     Record a successful run. Updates last_successful_run and calculates next_expected_run.
     Called after ANY successful run (scheduled or manual).
     """
-    now = datetime.now()
+    now = datetime.now(pytz.UTC)  # Store in UTC
     state = load_state()
     state["last_successful_run"] = now.isoformat()
     state["next_expected_run"] = get_next_scheduled_time(now)
@@ -157,7 +183,7 @@ def save_successful_weekly_run():
     Record a successful weekly run. Updates last_successful_weekly_run and 
     calculates next_expected_weekly_run. Called after ANY successful weekly run.
     """
-    now = datetime.now()
+    now = datetime.now(pytz.UTC)  # Store in UTC
     state = load_state()
     state["last_successful_weekly_run"] = now.isoformat()
     state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(now)
@@ -170,34 +196,35 @@ def init_state_if_needed():
     Initialize state on startup if next_expected_run is missing.
     Also migrates legacy 'last_run_date' to new format.
     Sets next_expected_run to today's scheduled time if before that time,
-    or tomorrow if after.
+    or tomorrow if after (all in Brisbane timezone).
     """
     state = load_state()
     
     # Migrate legacy state: convert last_run_date to last_successful_run
     if "last_run_date" in state and "last_successful_run" not in state:
-        # Convert date string to full timestamp (assume it ran at scheduled time)
+        # Convert date string to full timestamp (assume it ran at scheduled time in Brisbane)
         try:
             old_date = datetime.strptime(state["last_run_date"], "%Y-%m-%d")
-            migrated_time = old_date.replace(hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE)
-            state["last_successful_run"] = migrated_time.isoformat()
+            migrated_time = BRISBANE_TZ.localize(old_date.replace(hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE))
+            state["last_successful_run"] = migrated_time.astimezone(pytz.UTC).isoformat()
             del state["last_run_date"]  # Remove legacy field
             logger.info(f"Migrated legacy state: last_run_date -> last_successful_run={state['last_successful_run']}")
         except Exception as e:
             logger.error(f"Failed to migrate legacy state: {e}")
     
     if "next_expected_run" not in state:
-        now = datetime.now()
-        today_scheduled = datetime.combine(now.date(), datetime.min.time().replace(
+        # Use Brisbane timezone for scheduling logic
+        brisbane_now = datetime.now(BRISBANE_TZ)
+        today_scheduled = BRISBANE_TZ.localize(datetime.combine(brisbane_now.date(), datetime.min.time().replace(
             hour=SCHEDULED_RUN_HOUR, minute=SCHEDULED_RUN_MINUTE
-        ))
+        )))
         
-        if now < today_scheduled:
-            # Before today's run time - set deadline to today
-            state["next_expected_run"] = today_scheduled.isoformat()
+        if brisbane_now < today_scheduled:
+            # Before today's run time - set deadline to today (store in UTC)
+            state["next_expected_run"] = today_scheduled.astimezone(pytz.UTC).isoformat()
         else:
             # After today's run time - set deadline to tomorrow
-            state["next_expected_run"] = get_next_scheduled_time(now)
+            state["next_expected_run"] = get_next_scheduled_time(brisbane_now)
         
         save_state(state)
         logger.info(f"Initialized state with next_expected_run={state['next_expected_run']}")
@@ -209,29 +236,30 @@ def init_weekly_state_if_needed():
     """
     Initialize weekly state on startup if next_expected_weekly_run is missing.
     Sets next_expected_weekly_run to this Saturday if before that time,
-    or next Saturday if after.
+    or next Saturday if after (all in Brisbane timezone).
     """
     state = load_state()
     
     if "next_expected_weekly_run" not in state:
-        now = datetime.now()
+        # Use Brisbane timezone for scheduling logic
+        brisbane_now = datetime.now(BRISBANE_TZ)
         
         # Calculate this Saturday
-        days_until_saturday = WEEKLY_SCHEDULED_DAY - now.weekday()
+        days_until_saturday = WEEKLY_SCHEDULED_DAY - brisbane_now.weekday()
         if days_until_saturday < 0:  
             days_until_saturday += 7
         
-        this_saturday = now.date() + timedelta(days=days_until_saturday)
-        this_saturday_scheduled = datetime.combine(this_saturday, datetime.min.time().replace(
+        this_saturday = brisbane_now.date() + timedelta(days=days_until_saturday)
+        this_saturday_scheduled = BRISBANE_TZ.localize(datetime.combine(this_saturday, datetime.min.time().replace(
             hour=WEEKLY_SCHEDULED_HOUR, minute=WEEKLY_SCHEDULED_MINUTE
-        ))
+        )))
         
-        if now < this_saturday_scheduled:
-            # Before this Saturday's run time - set deadline to this Saturday
-            state["next_expected_weekly_run"] = this_saturday_scheduled.isoformat()
+        if brisbane_now < this_saturday_scheduled:
+            # Before this Saturday's run time - set deadline to this Saturday (store in UTC)
+            state["next_expected_weekly_run"] = this_saturday_scheduled.astimezone(pytz.UTC).isoformat()
         else:
             # After this Saturday's run time - set deadline to next Saturday
-            state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(now)
+            state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(brisbane_now)
         
         save_state(state)
         logger.info(f"Initialized weekly state with next_expected_weekly_run={state['next_expected_weekly_run']}")
@@ -243,6 +271,7 @@ def is_past_deadline():
     """
     Check if current time is past the deadline (next_expected_run + grace period).
     Returns (is_past, next_expected_run_dt, last_successful_run_dt)
+    All comparisons done in UTC timezone.
     """
     state = load_state()
     next_run_str = state.get("next_expected_run")
@@ -253,13 +282,18 @@ def is_past_deadline():
     
     try:
         next_run_dt = datetime.fromisoformat(next_run_str)
+        # Ensure timezone-aware (assume UTC if no timezone)
+        if next_run_dt.tzinfo is None:
+            next_run_dt = pytz.UTC.localize(next_run_dt)
         deadline = next_run_dt + timedelta(minutes=GRACE_PERIOD_MINUTES)
         
         last_success_dt = None
         if last_success_str:
             last_success_dt = datetime.fromisoformat(last_success_str)
+            if last_success_dt.tzinfo is None:
+                last_success_dt = pytz.UTC.localize(last_success_dt)
         
-        now = datetime.now()
+        now = datetime.now(pytz.UTC)  # Use UTC for comparison
         is_past = now > deadline
         
         return is_past, next_run_dt, last_success_dt
@@ -272,6 +306,7 @@ def is_past_weekly_deadline():
     """
     Check if current time is past the weekly deadline (next_expected_weekly_run + grace period).
     Returns (is_past, next_expected_run_dt, last_successful_run_dt)
+    All comparisons done in UTC timezone.
     """
     state = load_state()
     next_run_str = state.get("next_expected_weekly_run")
@@ -282,13 +317,18 @@ def is_past_weekly_deadline():
     
     try:
         next_run_dt = datetime.fromisoformat(next_run_str)
+        # Ensure timezone-aware (assume UTC if no timezone)
+        if next_run_dt.tzinfo is None:
+            next_run_dt = pytz.UTC.localize(next_run_dt)
         deadline = next_run_dt + timedelta(minutes=WEEKLY_GRACE_PERIOD_MINUTES)
         
         last_success_dt = None
         if last_success_str:
             last_success_dt = datetime.fromisoformat(last_success_str)
+            if last_success_dt.tzinfo is None:
+                last_success_dt = pytz.UTC.localize(last_success_dt)
         
-        now = datetime.now()
+        now = datetime.now(pytz.UTC)  # Use UTC for comparison
         is_past = now > deadline
         
         return is_past, next_run_dt, last_success_dt
