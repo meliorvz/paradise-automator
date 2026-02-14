@@ -1205,21 +1205,21 @@ def main():
             cleanup()
             return
 
-    # Normal Schedule Mode
+    # Normal Schedule Mode (all times in Australia/Brisbane timezone)
     if test_mode:
         logger.info("Scheduling report every 5 minutes")
         schedule.every(5).minutes.do(run_daily_report)
     else:
-        logger.info("Scheduling report daily at 13:00 Brisbane time (03:00 UTC)")
-        schedule.every().day.at("03:00").do(run_daily_report)
-    
-    # Weekly report every Saturday at 08:00 AM Brisbane time (22:00 UTC Friday)
-    logger.info("Scheduling weekly report every Saturday at 08:00 Brisbane time (22:00 UTC Friday)")
-    schedule.every().friday.at("22:00").do(run_weekly_report)
-    
-    # Daily Status Check (Telegram) at 9:00 PM Brisbane time (11:00 UTC)
-    logger.info("Scheduling daily status check at 21:00 Brisbane time (11:00 UTC)")
-    schedule.every().day.at("11:00").do(run_daily_status_check)
+        logger.info("Scheduling report daily at 13:00 Brisbane time")
+        schedule.every().day.at("13:00", "Australia/Brisbane").do(run_daily_report)
+
+    # Weekly report every Saturday at 08:00 AM Brisbane time
+    logger.info("Scheduling weekly report every Saturday at 08:00 Brisbane time")
+    schedule.every().saturday.at("08:00", "Australia/Brisbane").do(run_weekly_report)
+
+    # Daily Status Check (Telegram) at 9:00 PM Brisbane time
+    logger.info("Scheduling daily status check at 21:00 Brisbane time")
+    schedule.every().day.at("21:00", "Australia/Brisbane").do(run_daily_status_check)
     
     # Heartbeat check every 30 minutes to keep session alive and verify authentication
     logger.info("Scheduling heartbeat check every 30 minutes")
