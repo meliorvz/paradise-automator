@@ -339,37 +339,40 @@ def is_past_weekly_deadline():
 
 def configure_report_options(target_page):
     """
-    Enable 'Hide' options in the report modal before preview.
-    Toggles: Hide Account Balances, Hide Guest Comments, Hide Manager Comments.
-    Uses Bootstrap Switch - clicks the wrapper div if the checkbox is unchecked.
+    Configure report modal options before preview.
+    - Hides Account Balances
+    - SHOWS Guest and Manager Comments (Disables 'Hide' toggles)
     """
-    hide_options = [
-        ("hide_account_balances", "Hide Account Balances"),
-        ("hide_guest_comment", "Hide Guest Comments"),  # Note: singular
-        ("hide_manager_comments", "Hide Manager Comments"),  # Note: plural
+    options = [
+        ("hide_account_balances", True),   # We want to hide these
+        ("hide_guest_comment", False),    # We want to SHOW these (uncheck hide)
+        ("hide_manager_comments", False),  # We want to SHOW these (uncheck hide)
     ]
     
-    for option_id, option_name in hide_options:
+    for option_id, should_hide in options:
         try:
             checkbox = target_page.locator(f"#{option_id}")
             if checkbox.count() > 0:
-                is_checked = checkbox.is_checked()
-                if not is_checked:
-                    # Click the Bootstrap switch wrapper to toggle it on
+                is_currently_hidden = checkbox.is_checked()
+                
+                if is_currently_hidden != should_hide:
+                    # Click the Bootstrap switch wrapper to toggle it
                     switch_wrapper = target_page.locator(f".bootstrap-switch-id-{option_id}")
                     if switch_wrapper.count() > 0:
                         switch_wrapper.click()
-                        logger.info(f"  ✓ Enabled: {option_name}")
+                        status = "Enabled" if should_hide else "Disabled"
+                        logger.info(f"  ✓ {status}: {option_id}")
                     else:
-                        # Fallback: click the checkbox directly
                         checkbox.click()
-                        logger.info(f"  ✓ Enabled (fallback): {option_name}")
+                        status = "Enabled" if should_hide else "Disabled"
+                        logger.info(f"  ✓ {status} (fallback): {option_id}")
                 else:
-                    logger.info(f"  - Already enabled: {option_name}")
+                    status = "already hidden" if should_hide else "already shown"
+                    logger.info(f"  - {option_id} {status}")
             else:
-                logger.warning(f"  Option not found: {option_name} (#{option_id})")
+                logger.warning(f"  Option not found: #{option_id}")
         except Exception as e:
-            logger.warning(f"  Could not set {option_name}: {e}")
+            logger.warning(f"  Could not set #{option_id}: {e}")
     
     target_page.wait_for_timeout(500)
 
