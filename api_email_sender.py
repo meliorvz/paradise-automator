@@ -167,6 +167,16 @@ def parse_csv(file_path: str) -> list[dict]:
                     # Verify it's a real room number (starts with digit or letter for named rooms)
                     first_char = room.replace(" ", "").replace("-", "")[:1]
                     if first_char.isalnum():
+                        # Extract comments
+                        t20 = row.get("textBox20", "").strip()
+                        gc = row.get("textBox32", "").strip()
+                        mc = row.get("textBox33", "").strip()
+                        
+                        comments_parts = []
+                        if t20: comments_parts.append(t20)
+                        if gc and gc != "GC:": comments_parts.append(gc)
+                        if mc and mc != "MC:": comments_parts.append(mc)
+                        
                         data.append({
                             "room": room,
                             "booking_ref": booking_ref,
@@ -176,7 +186,8 @@ def parse_csv(file_path: str) -> list[dict]:
                             "infants": row.get("textBox8", "0"),
                             "time": row.get("textBox10", "").strip(),
                             "name": row.get("textBox19", "").strip() or "Guest",
-                            "date": date_str
+                            "date": date_str,
+                            "comments": " | ".join(comments_parts)
                         })
     except Exception as e:
         logger.error(f"Failed to parse CSV {file_path}: {e}")
@@ -252,16 +263,18 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
             return f"<p>No {title.lower()} scheduled.</p>"
             
         params = "border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top;"
+        comments_params = params + " font-size: 0.85em; max-width: 250px; color: #555;"
         html = f"<h3>{title} ({len(rows)})</h3>"
         html += "<table style='border-collapse: collapse; width: 100%; font-family: sans-serif;'>"
-        html += f"<tr style='background-color: #f2f2f2;'><th style='{params}'>Room</th><th style='{params}'>Type</th><th style='{params}'>Guest</th><th style='{params}'>Guests</th><th style='{params}'>{time_label}</th></tr>"
+        html += f"<tr style='background-color: #f2f2f2;'><th style='{params}'>Room</th><th style='{params}'>Type</th><th style='{params}'>Guest</th><th style='{params}'>Guests</th><th style='{params}'>{time_label}</th><th style='{params}'>Comments</th></tr>"
         
         for r in rows:
             pax_lines = f"{r['adults']} adults<br>{r['children']} children<br>{r['infants']} infants"
             time_val = r.get('time', '') or '-'
             room_type = r.get('room_type', '') or '-'
+            comments = r.get('comments', '')
             
-            html += f"<tr><td style='{params}'><b>{r['room']}</b></td><td style='{params}'>{room_type}</td><td style='{params}'>{r['name']}</td><td style='{params}'>{pax_lines}</td><td style='{params}'><b>{time_val}</b></td></tr>"
+            html += f"<tr><td style='{params}'><b>{r['room']}</b></td><td style='{params}'>{room_type}</td><td style='{params}'>{r['name']}</td><td style='{params}'>{pax_lines}</td><td style='{params}'><b>{time_val}</b></td><td style='{comments_params}'><i>{comments}</i></td></tr>"
         
         html += "</table>"
         return html
@@ -353,6 +366,7 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
             def render_section_table(rows, header_color, section_title):
                 if not rows:
                     return ""
+                comments_params = params + " font-size: 0.85em; max-width: 200px; color: #555;"
                 html = f"""
                 <h4 style='margin: 10px 0 5px 0; color: {header_color};'>{section_title}</h4>
                 <table style='border-collapse: collapse; width: 100%; font-family: sans-serif; margin-bottom: 15px;'>
@@ -361,16 +375,19 @@ def send_reports(arrivals_pdf: str, departures_pdf: str, arrivals_csv: str = Non
                         <th style='{params}'>Type</th>
                         <th style='{params}'>Guest</th>
                         <th style='{params}'>Guests</th>
+                        <th style='{params}'>Comments</th>
                     </tr>
                 """
                 for r in rows:
                     pax = f"{r['adults']}A / {r['children']}C / {r['infants']}I"
+                    comments = r.get('comments', '')
                     html += f"""
                     <tr>
                         <td style='{params}'><b>{r['room']}</b></td>
                         <td style='{params}'>{r.get('room_type', '-')}</td>
                         <td style='{params}'>{r['name']}</td>
                         <td style='{params}'>{pax}</td>
+                        <td style='{comments_params}'><i>{comments}</i></td>
                     </tr>
                     """
                 html += "</table>"

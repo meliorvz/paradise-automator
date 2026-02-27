@@ -1,4 +1,3 @@
-
 import sys
 import os
 
@@ -14,20 +13,22 @@ def generate_preview(arrivals_path, departures_path):
     print("\n--- EMAIL PREVIEW (Text Version) ---\n")
     
     print(f"**Arrivals ({len(arrivals_data)})**")
-    print("| Room | Type | Guest | Guests | Check-in |")
-    print("|---|---|---|---|---|")
+    print("| Room | Type | Guest | Guests | Check-in | Comments |")
+    print("|---|---|---|---|---|---|")
     for r in arrivals_data:
         pax = f"{r['adults']}A {r['children']}C {r['infants']}I"
-        print(f"| **{r['room']}** | {r['room_type']} | {r['name']} | {pax} | {r.get('time', '-') or '-'} |")
+        comments = r.get('comments', '')
+        print(f"| **{r['room']}** | {r['room_type']} | {r['name']} | {pax} | {r.get('time', '-') or '-'} | {comments} |")
         
     print("\n")
     
     print(f"**Departures ({len(departures_data)})**")
-    print("| Room | Type | Guest | Guests | Check-out |")
-    print("|---|---|---|---|---|")
+    print("| Room | Type | Guest | Guests | Check-out | Comments |")
+    print("|---|---|---|---|---|---|")
     for r in departures_data:
         pax = f"{r['adults']}A {r['children']}C {r['infants']}I"
-        print(f"| **{r['room']}** | {r['room_type']} | {r['name']} | {pax} | {r.get('time', '-') or '-'} |")
+        comments = r.get('comments', '')
+        print(f"| **{r['room']}** | {r['room_type']} | {r['name']} | {pax} | {r.get('time', '-') or '-'} | {comments} |")
 
 if __name__ == "__main__":
-    generate_preview("downloads/arrivals_20251231.csv", "downloads/departures_20251231.csv")
+    generate_preview("downloads/ArrivalReport (1).csv", "downloads/ArrivalReport (1).csv")
