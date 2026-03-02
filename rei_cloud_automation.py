@@ -589,15 +589,19 @@ def run_daily_report():
         
     except Exception as e:
         logger.error(f"Report failed: {e}")
+        error_details = str(e)
         try:
-            page.screenshot(path=f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-        except:
-            pass
+            scr_path = f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=scr_path)
+            logger.info(f"Screenshot saved to {scr_path}")
+            error_details += f"\nScreenshot saved as {scr_path}"
+        except Exception as scr_err:
+            logger.error(f"Could not take screenshot: {scr_err}")
             
         # Send Failure Alert (SMS/Telegram)
         try:
             from api_email_sender import send_failure_alert
-            send_failure_alert(str(e))
+            send_failure_alert(error_details)
         except Exception as alert_err:
             logger.error(f"Failed to send failure alert: {alert_err}")
 
@@ -813,15 +817,19 @@ def run_weekly_report():
             
     except Exception as e:
         logger.error(f"Weekly report failed: {e}")
+        error_details = f"WEEKLY REPORT FAILED: {str(e)}"
         try:
-            page.screenshot(path=f"weekly_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-        except:
-            pass
+            scr_path = f"weekly_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=scr_path)
+            logger.info(f"Screenshot saved to {scr_path}")
+            error_details += f"\nScreenshot saved as {scr_path}"
+        except Exception as scr_err:
+            logger.error(f"Could not take screenshot: {scr_err}")
             
         # Send Failure Alert (SMS/Telegram)
         try:
             from api_email_sender import send_failure_alert
-            send_failure_alert(f"WEEKLY REPORT FAILED: {str(e)}")
+            send_failure_alert(error_details)
         except Exception as alert_err:
             logger.error(f"Failed to send failure alert: {alert_err}")
 
@@ -920,6 +928,16 @@ def heartbeat_check():
         
         # Re-login failed or no credentials - send alert
         alert_msg = f"HEARTBEAT FAILED: {str(e)} - Auto re-login also failed or not configured."
+        
+        try:
+            if page:
+                scr_path = f"error_heartbeat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                page.screenshot(path=scr_path)
+                logger.info(f"Screenshot saved to {scr_path}")
+                alert_msg += f"\nScreenshot saved as {scr_path}"
+        except Exception as scr_err:
+            logger.error(f"Could not take screenshot: {scr_err}")
+
         logger.error(alert_msg)
         
         try:
