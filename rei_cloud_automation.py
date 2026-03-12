@@ -47,6 +47,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Import new booking extractor
+try:
+    from booking_data_extractor import run_daily_maintenance as run_booking_maintenance, run_historical as run_booking_historical
+except ImportError:
+    logger.warning("Could not import booking_data_extractor. Some features will be disabled.")
+    def run_booking_maintenance(): logger.error("Booking extraction not implemented.")
+    def run_booking_historical(): logger.error("Booking extraction not implemented.")
+
 # Globals
 playwright_instance = None
 browser = None
@@ -1143,6 +1151,8 @@ def main():
     test_mode = "--test" in sys.argv
     run_now = "--run-now" in sys.argv
     run_weekly = "--run-weekly" in sys.argv
+    run_bookings_hist = "--run-historical-bookings" in sys.argv
+    run_bookings_maint = "--run-maintenance-bookings" in sys.argv
     
     logger.info("=" * 60)
     logger.info("REI CLOUD AUTOMATION")
@@ -1246,6 +1256,10 @@ def main():
     logger.info("Scheduling heartbeat check every 30 minutes")
     schedule.every(30).minutes.do(heartbeat_check)
     
+    # Booking Data Extraction Maintenance
+    logger.info("Scheduling booking data extraction maintenance daily at 14:00 Brisbane time")
+    schedule.every().day.at("14:00", "Australia/Brisbane").do(run_booking_maintenance)
+    
     # Run immediately if --run-now (first time)
     if run_now:
         logger.info("Running initial daily report (--run-now)...")
@@ -1255,6 +1269,14 @@ def main():
     if run_weekly:
         logger.info("Running weekly report (--run-weekly)...")
         run_weekly_report()
+    
+    if run_bookings_hist:
+        logger.info("Running historical booking extraction (--run-historical-bookings)...")
+        run_booking_historical()
+        
+    if run_bookings_maint:
+        logger.info("Running booking extraction maintenance (--run-maintenance-bookings)...")
+        run_booking_maintenance()
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")
