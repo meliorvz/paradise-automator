@@ -36,6 +36,63 @@ REI_USERNAME = os.getenv("REI_USERNAME")
 REI_PASSWORD = os.getenv("REI_PASSWORD")
 
 
+def search_filters_visible(page, timeout=5000):
+    """Return True when the booking search filter bar is ready."""
+    try:
+        page.locator(
+            "div.rei-header-filter:has(label.lb-bold:text-is('Filters'))"
+        ).first.wait_for(state="visible", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def capture_failure_screenshot(page, prefix="extraction_error"):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = f"{prefix}_{timestamp}.png"
+    try:
+        page.screenshot(path=path)
+        logger.info("Saved failure screenshot: %s", path)
+    except Exception:
+        pass
+    return path
+
+
+def start_authenticated_session(playwright):
+    """Launch a fresh browser/context/page and authenticate it."""
+    browser = playwright.chromium.launch(
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled"]
+    )
+    context = browser.new_context(viewport={"width": 1800, "height": 1400})
+    page = context.new_page()
+
+    if not auto_login(page):
+        context.close()
+        browser.close()
+        raise RuntimeError("Could not authenticate booking extraction session.")
+
+    return browser, context, page
+
+
+def recycle_session(browser, context, page, playwright):
+    """Close the current browser session and start a fresh authenticated one."""
+    logger.info("Recycling browser session for historical extraction...")
+    try:
+        page.close()
+    except Exception:
+        pass
+    try:
+        context.close()
+    except Exception:
+        pass
+    try:
+        browser.close()
+    except Exception:
+        pass
+    return start_authenticated_session(playwright)
+
+
 def set_dropdown_value(page, label_text, option_text):
     """Select a value from the Syncfusion dropdown associated with a filter label."""
     filter_root = page.locator(
@@ -241,40 +298,63 @@ def extract_bookings(page, start_date, end_date, status="Departed"):
     """
     logger.info(f"Extracting bookings from {start_date} to {end_date} (Status: {status})...")
     
-    try:
+    search_ready = False
+    for attempt in range(1, 4):
         page.goto(SEARCH_URL, timeout=60000)
-        page.wait_for_load_state("networkidle")
-
-        logger.info(f"Setting filter to {status}...")
-        set_dropdown_value(page, "Filters", status)
-        set_dropdown_value(page, "Date Mode", "Arrival")
-
-        logger.info(f"Setting dates: {start_date} - {end_date}")
-        page.get_by_placeholder("From").fill(start_date)
-        page.get_by_placeholder("To").fill(end_date)
-
-        logger.info("Executing search...")
-        page.get_by_role("button", name="Search").click()
-        page.wait_for_timeout(8000)
-
-        data, expected_rows = extract_all_result_rows(page)
-        if expected_rows is not None and len(data) != expected_rows:
-            logger.warning(
-                "Grid summary reported %s rows but extractor collected %s rows.",
-                expected_rows,
-                len(data),
-            )
-
-        logger.info(f"✓ Extracted {len(data)} rows.")
-        return data
-
-    except Exception as e:
-        logger.error(f"Extraction failed: {e}")
         try:
-            page.screenshot(path=f"extraction_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-        except:
-            pass
-        return []
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(3000)
+
+        if search_filters_visible(page, timeout=8000):
+            search_ready = True
+            break
+
+        current_url = page.url.lower()
+        if "b2clogin" in current_url or "login" in current_url:
+            logger.warning(
+                "Search page redirected to login on attempt %s/3. Re-authenticating...",
+                attempt,
+            )
+            if not auto_login(page):
+                raise RuntimeError("Search page redirected to login and re-authentication failed.")
+            page.wait_for_timeout(2000)
+            continue
+
+        logger.warning(
+            "Search filters were not visible on attempt %s/3. URL: %s",
+            attempt,
+            page.url,
+        )
+        page.wait_for_timeout(2000)
+
+    if not search_ready:
+        raise RuntimeError(
+            f"Search filters did not load on booking search page after retries. Current URL: {page.url}"
+        )
+
+    logger.info(f"Setting filter to {status}...")
+    set_dropdown_value(page, "Filters", status)
+    set_dropdown_value(page, "Date Mode", "Arrival")
+
+    logger.info(f"Setting dates: {start_date} - {end_date}")
+    page.get_by_placeholder("From").fill(start_date)
+    page.get_by_placeholder("To").fill(end_date)
+
+    logger.info("Executing search...")
+    page.get_by_role("button", name="Search").click()
+    page.wait_for_timeout(8000)
+
+    data, expected_rows = extract_all_result_rows(page)
+    if expected_rows is not None and len(data) != expected_rows:
+        logger.warning(
+            "Grid summary reported %s rows but extractor collected %s rows.",
+            expected_rows,
+            len(data),
+        )
+
+    logger.info(f"✓ Extracted {len(data)} rows.")
+    return data
 
 def save_to_csv(data, filename):
     if not data:
@@ -382,15 +462,13 @@ def run_historical(
                 f"using checkpoint {checkpoint_file}"
             )
     
+    completed_all_batches = False
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
-        context = browser.new_context(viewport={"width": 1800, "height": 1400})
-        page = context.new_page()
-        
-        if auto_login(page):
+        browser = context = page = None
+        browser, context, page = start_authenticated_session(p)
+
+        try:
             while current_end >= start_dt:
                 current_start = current_end - timedelta(days=MAX_BATCH_DAYS)
                 if current_start < start_dt:
@@ -398,30 +476,65 @@ def run_historical(
 
                 s = current_start.strftime("%d/%m/%Y")
                 e = current_end.strftime("%d/%m/%Y")
-                
+
                 logger.info(f"--- Processing Batch: {s} to {e} ---")
-                batch_rows = extract_and_save_range(
-                    page,
-                    current_start,
-                    current_end,
-                    output_file,
-                    status="Departed",
-                )
+
+                batch_rows = None
+                for attempt in range(1, 4):
+                    try:
+                        batch_rows = extract_and_save_range(
+                            page,
+                            current_start,
+                            current_end,
+                            output_file,
+                            status="Departed",
+                        )
+                        break
+                    except Exception as exc:
+                        logger.error(
+                            "Batch attempt %s/3 failed for %s to %s: %s",
+                            attempt,
+                            s,
+                            e,
+                            exc,
+                        )
+                        capture_failure_screenshot(page)
+                        save_checkpoint(checkpoint_file, current_end, total_rows, completed_batches)
+                        if attempt >= 3:
+                            raise
+                        browser, context, page = recycle_session(browser, context, page, p)
+
                 total_rows += batch_rows
                 completed_batches += 1
                 logger.info(
                     f"Completed batch {completed_batches}: {s} to {e} "
                     f"({batch_rows} rows, cumulative {total_rows})"
                 )
-                
-                # Move to the previous period.
+
                 current_end = current_start - timedelta(days=1)
                 save_checkpoint(checkpoint_file, current_end, total_rows, completed_batches)
                 page.wait_for_timeout(2000)
-                
-        browser.close()
 
-    clear_checkpoint(checkpoint_file)
+                if completed_batches % 10 == 0 and current_end >= start_dt:
+                    browser, context, page = recycle_session(browser, context, page, p)
+
+            completed_all_batches = True
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+    if completed_all_batches:
+        clear_checkpoint(checkpoint_file)
 
 def run_daily_maintenance():
     """Extract bookings for yesterday and today to ensure everything is captured."""
