@@ -9,6 +9,7 @@ downloads/
 # Logs
 *.log
 automation.log
+state/
 
 # Python
 __pycache__/

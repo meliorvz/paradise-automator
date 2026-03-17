@@ -2,6 +2,14 @@
 
 Automate daily cleaning report generation from REI Cloud using Playwright.
 
+## Documentation
+
+- `docs/USER_GUIDE.md` - operator guide for the current daily and weekly cleaning report workflow
+- `docs/RUNNING.md` - how to run the existing automator locally or on the VPS
+- `docs/GUEST_REVIEW_REQUEST_SPEC.md` - guest review request feature spec
+- `docs/GUEST_REVIEW_REQUEST_RUNBOOK.md` - operator and OpenClaw usage guide for guest review requests
+- `docs/GUEST_REVIEW_REQUEST_IMPLEMENTATION_NOTES.md` - current implementation notes and future cutover notes
+
 ## Prerequisites
 
 - Python 3.8+
@@ -70,7 +78,10 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 ├── downloads/               # Downloaded PDFs
 └── docs/
     ├── scheduling.md        # Scheduling instructions
-    └── vps_migration.md     # VPS deployment guide
+    ├── vps_migration.md     # VPS deployment guide
+    ├── GUEST_REVIEW_REQUEST_SPEC.md
+    ├── GUEST_REVIEW_REQUEST_RUNBOOK.md
+    └── GUEST_REVIEW_REQUEST_IMPLEMENTATION_NOTES.md
 ```
 
 ## Security Notes
