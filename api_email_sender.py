@@ -6,19 +6,21 @@ Documentation: https://comms.paradisestayz.com.au/api/integrations/v1/send
 
 import os
 import base64
-import requests
 import logging
 from pathlib import Path
 from datetime import date
 from dotenv import load_dotenv
+
+from comms_client import DEFAULT_COMMS_API_URL, build_comms_client
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-API_URL = os.getenv("COMMS_API_URL", "https://comms-centre-prod.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
+API_URL = os.getenv("COMMS_API_URL", DEFAULT_COMMS_API_URL)
 API_KEY = os.getenv("COMMS_API_KEY", "")
+COMMS_PROVIDER = os.getenv("COMMS_PROVIDER", "integration_api")
 EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
 EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
 SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
@@ -56,7 +58,10 @@ def send_email_via_comms_centre(
     """
     Send an email with multiple base64-encoded attachments via Comms Centre API.
     """
-    if not API_KEY:
+    client = build_comms_client()
+    config = client.config
+
+    if not config.has_api_key:
         logger.error("COMMS_API_KEY not configured in .env")
         return False
     
@@ -97,50 +102,30 @@ def send_email_via_comms_centre(
     if cc_list:
         payload["cc"] = cc_list
     
-    headers = {
-        "x-integration-key": API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
+    logger.info(f"Triggering Comms API provider={config.provider}: POST {config.api_url}")
+    logger.info(f"Targeting {len(recipients)} recipient(s) with {len(attachments)} attachment(s)...")
 
-    try:
-        logger.info(f"Triggering Comms Centre API: POST {API_URL}")
-        logger.info(f"Targeting {len(recipients)} recipient(s) with {len(attachments)} attachment(s)...")
-        
-        # Use a session with retry logic for robustness
-        session = requests.Session()
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["POST"]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("https://", adapter)
-        
-        response = session.post(API_URL, json=payload, headers=headers, timeout=60)
-        
-        if response.status_code == 200:
-            res_json = response.json()
-            if res_json.get("success"):
-                logger.info("✓ Comms Centre API: Message sent successfully!")
-                return True
-            else:
-                logger.error(f"Comms Centre API error status: {res_json}")
-                return False
-        elif response.status_code == 405:
-            logger.error(f"Comms Centre API error: 405 Method Not Allowed. Is the URL correct? URL: {API_URL}")
-            logger.error(f"Allowed methods: {response.headers.get('Allow', 'Not specified')}")
-            return False
-        else:
-            logger.error(f"Comms Centre API error: {response.status_code} - {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Comms Centre API request failed: {e}")
+    result = client.send(payload, timeout=60, retry_total=3)
+    if result.error:
+        logger.error(f"Comms API request failed: {result.error}")
         return False
+
+    if result.status_code == 200:
+        res_json = result.response_json or {}
+        if res_json.get("success"):
+            logger.info("Comms API: Message sent successfully")
+            return True
+        logger.error(f"Comms API returned non-success payload: {res_json}")
+        return False
+
+    if result.status_code == 405:
+        logger.error(f"Comms API error: 405 Method Not Allowed. Is the URL correct? URL: {config.api_url}")
+        allow_header = (result.response_headers or {}).get("Allow", "Not specified")
+        logger.error(f"Allowed methods: {allow_header}")
+        return False
+
+    logger.error(f"Comms API error: {result.status_code} - {result.response_text}")
+    return False
 
 
 def parse_csv(file_path: str) -> list[dict]:
@@ -521,7 +506,8 @@ See the email content for the detailed list.
 
 def send_sms_notification(to_phones: str, message: str) -> bool:
     """Send an SMS notification to one or more phones (comma-separated)."""
-    if not API_KEY:
+    client = build_comms_client()
+    if not client.config.has_api_key:
         logger.error("API key not configured for SMS")
         return False
     
@@ -537,28 +523,22 @@ def send_sms_notification(to_phones: str, message: str) -> bool:
         "body": message
     }
     
-    headers = {
-        "x-integration-key": API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        logger.info(f"Sending SMS to {phone_list}...")
-        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
-        if response.status_code == 200 and response.json().get("success"):
-            logger.info("✓ SMS sent successfully")
-            return True
-        else:
-            logger.error(f"SMS failed: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"SMS error: {e}")
+    logger.info(f"Sending SMS to {phone_list} via provider={client.config.provider}...")
+    result = client.send(payload, timeout=30)
+    if result.error:
+        logger.error(f"SMS error: {result.error}")
         return False
+    if result.success:
+        logger.info("SMS sent successfully")
+        return True
+    logger.error(f"SMS failed: {result.response_text}")
+    return False
 
 
 def send_telegram_notification(message: str) -> bool:
     """Send a Telegram notification (uses default integration recipients)."""
-    if not API_KEY:
+    client = build_comms_client()
+    if not client.config.has_api_key:
         logger.error("API key not configured for Telegram")
         return False
     
@@ -572,47 +552,28 @@ def send_telegram_notification(message: str) -> bool:
         "body": message
     }
     
-    headers = {
-        "x-integration-key": API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        logger.info("Sending Telegram notification...")
-        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
-        if response.status_code == 200 and response.json().get("success"):
-            logger.info("✓ Telegram notification sent")
-            return True
-        else:
-            logger.error(f"Telegram failed: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
+    logger.info(f"Sending Telegram notification via provider={client.config.provider}...")
+    result = client.send(payload, timeout=30)
+    if result.error:
+        logger.error(f"Telegram error: {result.error}")
         return False
+    if result.success:
+        logger.info("Telegram notification sent")
+        return True
+    logger.error(f"Telegram failed: {result.response_text}")
+    return False
 
 
 def send_failure_alert(error_message: str) -> bool:
     """
     Send an urgent failure notification via SMS and Telegram.
     """
-    if not API_KEY:
+    client = build_comms_client()
+    if not client.config.has_api_key:
         logger.error("COMMS_API_KEY not configured")
         return False
 
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-
     body = f"🚨 URGENT: REI Automation FAILED\n\nError: {error_message}\n\nPlease check the server immediately."
-    
-    headers = {
-        "x-integration-key": API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    # Setup session with retry
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retry))
     
     # Split comma-separated escalation phones into a list
     escalation_phones = [p.strip() for p in ESCALATION_PHONE.split(",") if p.strip()]
@@ -631,15 +592,14 @@ def send_failure_alert(error_message: str) -> bool:
             "to": sms_recipients,
             "body": body
         }
-        try:
-            response = session.post(API_URL, json=sms_payload, headers=headers, timeout=30)
-            sms_success = response.status_code == 200 and response.json().get("success")
-            if sms_success:
-                logger.info(f"✓ SMS escalation sent to {len(sms_recipients)} recipient(s)")
-            else:
-                logger.error(f"SMS escalation failed: {response.text}")
-        except Exception as e:
-            logger.error(f"SMS escalation error: {e}")
+        sms_result = client.send(sms_payload, timeout=30, retry_total=3)
+        sms_success = sms_result.success
+        if sms_success:
+            logger.info(f"SMS escalation sent to {len(sms_recipients)} recipient(s)")
+        elif sms_result.error:
+            logger.error(f"SMS escalation error: {sms_result.error}")
+        else:
+            logger.error(f"SMS escalation failed: {sms_result.response_text}")
     
     # Send Telegram if configured
     telegram_success = False
@@ -649,15 +609,14 @@ def send_failure_alert(error_message: str) -> bool:
             "to": telegram_recipients,
             "body": body
         }
-        try:
-            response = session.post(API_URL, json=telegram_payload, headers=headers, timeout=30)
-            telegram_success = response.status_code == 200 and response.json().get("success")
-            if telegram_success:
-                logger.info("✓ Telegram escalation sent")
-            else:
-                logger.error(f"Telegram escalation failed: {response.text}")
-        except Exception as e:
-            logger.error(f"Telegram escalation error: {e}")
+        telegram_result = client.send(telegram_payload, timeout=30, retry_total=3)
+        telegram_success = telegram_result.success
+        if telegram_success:
+            logger.info("Telegram escalation sent")
+        elif telegram_result.error:
+            logger.error(f"Telegram escalation error: {telegram_result.error}")
+        else:
+            logger.error(f"Telegram escalation failed: {telegram_result.response_text}")
     
     return sms_success or telegram_success
 
@@ -666,5 +625,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("Comms Centre API Integration ready.")
     print(f"Endpoint: {API_URL}")
+    print(f"Provider: {COMMS_PROVIDER}")
     print(f"API Key configured: {'YES' if API_KEY else 'NO'}")
     print(f"Recipients: {EMAIL_TO}")

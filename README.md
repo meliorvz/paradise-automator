@@ -2,6 +2,13 @@
 
 Automate daily cleaning report generation from REI Cloud using Playwright.
 
+## Documentation
+
+- `docs/USER_GUIDE.md` - operator guide for the current daily and weekly cleaning report workflow
+- `docs/RUNNING.md` - how to run the existing automator locally or on the VPS
+- `docs/GUEST_REVIEW_REQUEST_SPEC.md` - detailed planned spec for the guest review request feature
+- `docs/GUEST_REVIEW_REQUEST_RUNBOOK.md` - planned operator and OpenClaw usage guide for the guest review request feature
+
 ## Prerequisites
 
 - Python 3.8+
@@ -70,7 +77,9 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 ├── downloads/               # Downloaded PDFs
 └── docs/
     ├── scheduling.md        # Scheduling instructions
-    └── vps_migration.md     # VPS deployment guide
+    ├── vps_migration.md     # VPS deployment guide
+    ├── GUEST_REVIEW_REQUEST_SPEC.md
+    └── GUEST_REVIEW_REQUEST_RUNBOOK.md
 ```
 
 ## Security Notes
@@ -79,6 +88,16 @@ See [docs/scheduling.md](docs/scheduling.md) for Mac/Linux/Windows instructions.
 - Use Gmail App Password, not your main password
 - Set `chmod 600` on sensitive files
 - For VPS, use environment variables instead of `.env` file
+
+## Comms Transport Settings
+
+Outbound report and alert comms go through the integrations contract (`POST /api/integrations/v1/send`) from `api_email_sender.py`.
+
+- `COMMS_PROVIDER` selects the transport strategy label. Default is `integration_api`.
+- `COMMS_API_URL` selects which comms endpoint to target.
+- `COMMS_API_KEY` is sent as `x-integration-key`.
+
+Current behavior is unchanged by default: if `COMMS_PROVIDER` is not set, the existing integrations API path is used.
 
 ## Refreshing Login Session
 
