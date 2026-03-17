@@ -21,8 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-REI_CLOUD_URL = "https://reimasterapps.com.au/Customers/Dashboard?reicid=758"
-SEARCH_URL = "https://reimasterapps.com.au/Booking/search?reicid=758"
+REI_CLOUD_URL = "https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758"
+SEARCH_URL = "https://app.reimasterapps.com.au/Booking/search?reicid=758"
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 MAX_BATCH_DAYS = 62

@@ -32,7 +32,7 @@ from playwright.sync_api import sync_playwright
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/opt/paradise-automator/downloads"))
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-REI_CLOUD_URL = "https://reimasterapps.com.au/Customers/Dashboard?reicid=758"
+REI_CLOUD_URL = "https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758"
 REI_USERNAME = os.getenv("REI_USERNAME", "")
 REI_PASSWORD = os.getenv("REI_PASSWORD", "")
 
@@ -107,7 +107,7 @@ def run_weekly():
                     return False
             
             logger.info("✓ Logged in, navigating to Report List...")
-            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
             page.wait_for_timeout(3000)
             
             # ===== ARRIVAL REPORT (WEEKLY) =====
@@ -169,7 +169,7 @@ def run_weekly():
             page.wait_for_timeout(2000)
             
             # Go back to Report List
-            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
             page.wait_for_timeout(3000)
             
             # ===== DEPARTURE REPORT (WEEKLY) =====

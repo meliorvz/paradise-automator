@@ -28,7 +28,7 @@ load_dotenv()
 
 # Configuration
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
-REI_CLOUD_URL = "https://reimasterapps.com.au/Customers/Dashboard?reicid=758"
+REI_CLOUD_URL = "https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758"
 
 # REI Cloud Credentials (optional - for auto-login)
 REI_USERNAME = os.getenv("REI_USERNAME", "")
@@ -396,7 +396,7 @@ def run_daily_report():
     try:
         # Go to Report List
         logger.info("Navigating to Report List...")
-        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
         page.wait_for_timeout(3000)
         
         # ===== ARRIVAL REPORT =====
@@ -407,7 +407,7 @@ def run_daily_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -490,7 +490,7 @@ def run_daily_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
         page.wait_for_timeout(3000)
         
         # ===== DEPARTURE REPORT =====
@@ -625,7 +625,7 @@ def run_weekly_report():
     try:
         # Go to Report List
         logger.info("Navigating to Report List...")
-        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
         page.wait_for_timeout(3000)
         
         # ===== ARRIVAL REPORT (WEEKLY) =====
@@ -636,7 +636,7 @@ def run_weekly_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -717,7 +717,7 @@ def run_weekly_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
         page.wait_for_timeout(3000)
         
         # ===== DEPARTURE REPORT (WEEKLY) =====
@@ -883,7 +883,7 @@ def heartbeat_check():
         # Step 1: Navigate to Reports page first (generates server activity)
         try:
             logger.info("  → Navigating to Reports page...")
-            page.goto("https://reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Reports failed: {nav_error}")
@@ -896,7 +896,7 @@ def heartbeat_check():
         # Step 2: Navigate back to Dashboard (second navigation = more activity)
         try:
             logger.info("  → Navigating back to Dashboard...")
-            page.goto("https://reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
+            page.goto("https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Dashboard failed: {nav_error}")
