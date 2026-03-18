@@ -49,10 +49,15 @@ logger = logging.getLogger(__name__)
 
 # Import new booking extractor
 try:
-    from booking_data_extractor import run_daily_maintenance as run_booking_maintenance, run_historical as run_booking_historical
+    from booking_data_extractor import (
+        run_daily_maintenance as run_booking_maintenance,
+        run_future_window as run_booking_future_window,
+        run_historical as run_booking_historical,
+    )
 except ImportError:
     logger.warning("Could not import booking_data_extractor. Some features will be disabled.")
     def run_booking_maintenance(): logger.error("Booking extraction not implemented.")
+    def run_booking_future_window(*args, **kwargs): logger.error("Booking extraction not implemented.")
     def run_booking_historical(): logger.error("Booking extraction not implemented.")
 
 # Globals
@@ -95,6 +100,18 @@ WEEKLY_SCHEDULED_DAY = 5  # Saturday (Monday=0, Sunday=6)
 WEEKLY_SCHEDULED_HOUR = 8
 WEEKLY_SCHEDULED_MINUTE = 0
 WEEKLY_GRACE_PERIOD_MINUTES = 10
+BOOKING_FUTURE_WINDOW_DAYS_BACK = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_BACK", "30"))
+BOOKING_FUTURE_WINDOW_DAYS_AHEAD = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_AHEAD", "90"))
+BOOKING_FUTURE_WINDOW_OUTPUT = os.getenv("BOOKING_FUTURE_WINDOW_OUTPUT", "all_bookings_future_window.csv")
+
+
+def run_booking_future_snapshot():
+    """Extract a rolling arrival-window snapshot for downstream imports."""
+    run_booking_future_window(
+        days_back=BOOKING_FUTURE_WINDOW_DAYS_BACK,
+        days_ahead=BOOKING_FUTURE_WINDOW_DAYS_AHEAD,
+        output_file=BOOKING_FUTURE_WINDOW_OUTPUT,
+    )
 
 
 def load_state():
@@ -1153,6 +1170,7 @@ def main():
     run_weekly = "--run-weekly" in sys.argv
     run_bookings_hist = "--run-historical-bookings" in sys.argv
     run_bookings_maint = "--run-maintenance-bookings" in sys.argv
+    run_bookings_future = "--run-future-window-bookings" in sys.argv
     
     logger.info("=" * 60)
     logger.info("REI CLOUD AUTOMATION")
@@ -1259,6 +1277,12 @@ def main():
     # Booking Data Extraction Maintenance
     logger.info("Scheduling booking data extraction maintenance daily at 14:00 Brisbane time")
     schedule.every().day.at("14:00", "Australia/Brisbane").do(run_booking_maintenance)
+    logger.info(
+        "Scheduling rolling booking window snapshot daily at 14:15 Brisbane time (%s days back, %s days ahead)",
+        BOOKING_FUTURE_WINDOW_DAYS_BACK,
+        BOOKING_FUTURE_WINDOW_DAYS_AHEAD,
+    )
+    schedule.every().day.at("14:15", "Australia/Brisbane").do(run_booking_future_snapshot)
     
     # Run immediately if --run-now (first time)
     if run_now:
@@ -1277,6 +1301,10 @@ def main():
     if run_bookings_maint:
         logger.info("Running booking extraction maintenance (--run-maintenance-bookings)...")
         run_booking_maintenance()
+
+    if run_bookings_future:
+        logger.info("Running rolling booking window extraction (--run-future-window-bookings)...")
+        run_booking_future_snapshot()
     
     logger.info("=" * 60)
     logger.info("AUTOMATION IS LIVE")

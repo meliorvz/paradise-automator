@@ -99,6 +99,35 @@ def set_dropdown_value(page, label_text, option_text):
         f"div.rei-header-filter:has(label.lb-bold:text-is('{label_text}'))"
     ).first
     filter_root.wait_for(state="visible", timeout=20000)
+
+    def current_value():
+        selectors = [
+            "input.e-input",
+            "input[role='combobox']",
+            ".e-input",
+            ".e-ddl .e-input-value",
+        ]
+        for selector in selectors:
+            locator = filter_root.locator(selector).first
+            try:
+                if locator.count() == 0:
+                    continue
+                value = ""
+                try:
+                    value = (locator.input_value() or "").strip()
+                except Exception:
+                    value = (locator.text_content() or "").strip()
+                if value:
+                    return value
+            except Exception:
+                continue
+        return ""
+
+    existing_value = current_value()
+    if existing_value.casefold() == option_text.casefold():
+        logger.info("%s already set to %s.", label_text, option_text)
+        return
+
     toggle = filter_root.locator(".e-input-group-icon").first
     toggle.click(force=True)
     page.wait_for_timeout(800)
@@ -107,7 +136,15 @@ def set_dropdown_value(page, label_text, option_text):
         f".e-popup-open [role='option']:text-is('{option_text}'), "
         f".e-popup-open li:text-is('{option_text}')"
     ).first
-    option.click()
+    try:
+        option.wait_for(state="visible", timeout=5000)
+        option.click()
+    except Exception:
+        updated_value = current_value()
+        if updated_value.casefold() == option_text.casefold():
+            logger.info("%s remained set to %s after dropdown interaction.", label_text, option_text)
+            return
+        raise
     page.wait_for_timeout(800)
 
 
@@ -291,12 +328,18 @@ def auto_login(page):
     logger.warning("Auto-login: max attempts reached, still on login page.")
     return False
 
-def extract_bookings(page, start_date, end_date, status="Departed"):
+def extract_bookings(page, start_date, end_date, status="Departed", date_mode="Arrival"):
     """
     Extracts bookings for a specific date range and status.
     Dates should be strings in DD/MM/YYYY format.
     """
-    logger.info(f"Extracting bookings from {start_date} to {end_date} (Status: {status})...")
+    logger.info(
+        "Extracting bookings from %s to %s (Status: %s, Date Mode: %s)...",
+        start_date,
+        end_date,
+        status if status else "<REI default>",
+        date_mode,
+    )
     
     search_ready = False
     for attempt in range(1, 4):
@@ -333,9 +376,14 @@ def extract_bookings(page, start_date, end_date, status="Departed"):
             f"Search filters did not load on booking search page after retries. Current URL: {page.url}"
         )
 
-    logger.info(f"Setting filter to {status}...")
-    set_dropdown_value(page, "Filters", status)
-    set_dropdown_value(page, "Date Mode", "Arrival")
+    if status:
+        logger.info("Setting filter to %s...", status)
+        set_dropdown_value(page, "Filters", status)
+    else:
+        logger.info("Leaving Filters dropdown at the REI default selection.")
+
+    logger.info("Setting Date Mode to %s...", date_mode)
+    set_dropdown_value(page, "Date Mode", date_mode)
 
     logger.info(f"Setting dates: {start_date} - {end_date}")
     page.get_by_placeholder("From").fill(start_date)
@@ -402,10 +450,10 @@ def clear_checkpoint(checkpoint_file):
         Path(checkpoint_file).unlink()
 
 
-def extract_and_save_range(page, start_dt, end_dt, output_file, status="Departed"):
+def extract_and_save_range(page, start_dt, end_dt, output_file, status="Departed", date_mode="Arrival"):
     s = start_dt.strftime("%d/%m/%Y")
     e = end_dt.strftime("%d/%m/%Y")
-    data = extract_bookings(page, s, e, status=status)
+    data = extract_bookings(page, s, e, status=status, date_mode=date_mode)
 
     if len(data) >= QUERY_ROW_LIMIT and start_dt < end_dt:
         span_days = (end_dt - start_dt).days
@@ -413,8 +461,22 @@ def extract_and_save_range(page, start_dt, end_dt, output_file, status="Departed
         logger.warning(
             f"Range {s} to {e} returned {len(data)} rows; splitting to avoid hitting the query limit."
         )
-        left_count = extract_and_save_range(page, start_dt, midpoint, output_file, status=status)
-        right_count = extract_and_save_range(page, midpoint + timedelta(days=1), end_dt, output_file, status=status)
+        left_count = extract_and_save_range(
+            page,
+            start_dt,
+            midpoint,
+            output_file,
+            status=status,
+            date_mode=date_mode,
+        )
+        right_count = extract_and_save_range(
+            page,
+            midpoint + timedelta(days=1),
+            end_dt,
+            output_file,
+            status=status,
+            date_mode=date_mode,
+        )
         return left_count + right_count
 
     if len(data) >= QUERY_ROW_LIMIT and start_dt == end_dt:
@@ -564,16 +626,97 @@ def run_daily_maintenance():
                 
         browser.close()
 
+
+def run_future_window(
+    days_back=30,
+    days_ahead=90,
+    output_file="all_bookings_future_window.csv",
+    status=None,
+    date_mode="Arrival",
+):
+    """Extract a rolling booking window without changing existing maintenance flows."""
+    if days_back < 0:
+        raise ValueError("Future window days_back must be zero or greater.")
+    if days_ahead < 0:
+        raise ValueError("Future window days_ahead must be zero or greater.")
+
+    now = datetime.now()
+    start_dt = now - timedelta(days=days_back)
+    end_dt = now + timedelta(days=days_ahead)
+    output_path = Path(output_file)
+
+    if output_path.exists():
+        logger.info("Removing previous future-window snapshot: %s", output_path)
+        output_path.unlink()
+
+    with sync_playwright() as p:
+        browser = context = page = None
+        browser, context, page = start_authenticated_session(p)
+
+        try:
+            logger.info(
+                "Running rolling future window extraction from %s to %s (days_back=%s, days_ahead=%s, status=%s, date_mode=%s)...",
+                start_dt.strftime("%d/%m/%Y"),
+                end_dt.strftime("%d/%m/%Y"),
+                days_back,
+                days_ahead,
+                status if status else "<REI default>",
+                date_mode,
+            )
+            rows_written = extract_and_save_range(
+                page,
+                start_dt,
+                end_dt,
+                output_file,
+                status=status,
+                date_mode=date_mode,
+            )
+            logger.info(
+                "Completed future window extraction to %s with %s rows.",
+                output_file,
+                rows_written,
+            )
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="REI Cloud Booking Extractor")
     parser.add_argument("--historical", action="store_true", help="Run full historical extraction")
     parser.add_argument("--maintenance", action="store_true", help="Run daily maintenance extraction")
+    parser.add_argument("--future-window", action="store_true", help="Run a forward-looking booking window extraction")
     parser.add_argument("--start", help="Start date (DD/MM/YYYY) for historical run")
     parser.add_argument("--end", help="End date (DD/MM/YYYY) for historical run")
     parser.add_argument("--output", default="all_bookings_historical.csv", help="Output CSV path")
     parser.add_argument("--checkpoint", help="Checkpoint JSON path")
     parser.add_argument("--resume", action="store_true", help="Resume historical extraction from checkpoint")
+    parser.add_argument("--days-back", type=int, default=30, help="Days back to include for --future-window")
+    parser.add_argument("--days-ahead", type=int, default=90, help="Days ahead to extract for --future-window")
+    parser.add_argument(
+        "--future-output",
+        default="all_bookings_future_window.csv",
+        help="Output CSV path for --future-window",
+    )
+    parser.add_argument(
+        "--future-status",
+        help="Optional Filters dropdown value for --future-window. Leave unset to use the REI default selection.",
+    )
+    parser.add_argument(
+        "--future-date-mode",
+        default="Arrival",
+        help="Date Mode dropdown value for --future-window (default: Arrival)",
+    )
     
     args = parser.parse_args()
     
@@ -582,5 +725,13 @@ if __name__ == "__main__":
         run_historical(start, args.end, args.output, args.checkpoint, args.resume)
     elif args.maintenance:
         run_daily_maintenance()
+    elif args.future_window:
+        run_future_window(
+            days_back=args.days_back,
+            days_ahead=args.days_ahead,
+            output_file=args.future_output,
+            status=args.future_status,
+            date_mode=args.future_date_mode,
+        )
     else:
         parser.print_help()
