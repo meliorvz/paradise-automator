@@ -108,7 +108,7 @@ class FakePage:
         return None
 
 
-def install_stub_modules():
+def install_stub_modules(include_future_window=True):
     schedule = types.ModuleType("schedule")
     schedule.every = lambda *args, **kwargs: types.SimpleNamespace(
         minutes=types.SimpleNamespace(do=lambda *a, **k: None),
@@ -135,7 +135,8 @@ def install_stub_modules():
 
     booking = types.ModuleType("booking_data_extractor")
     booking.run_daily_maintenance = lambda *args, **kwargs: None
-    booking.run_future_window = lambda *args, **kwargs: None
+    if include_future_window:
+        booking.run_future_window = lambda *args, **kwargs: None
     booking.run_historical = lambda *args, **kwargs: None
     sys.modules["booking_data_extractor"] = booking
 
@@ -167,8 +168,8 @@ def install_stub_modules():
     sys.modules["pytz"] = pytz
 
 
-def load_module():
-    install_stub_modules()
+def load_module(include_future_window=True):
+    install_stub_modules(include_future_window=include_future_window)
     sys.modules.pop("rei_cloud_automation_under_test", None)
     logging.shutdown()
     root_logger = logging.getLogger()
@@ -211,6 +212,14 @@ class ReiCloudAutomationTests(unittest.TestCase):
 
         self.assertTrue(self.module.page_is_report_list_ready(report_page))
         self.assertTrue(self.module.page_is_authenticated_session(report_page))
+
+    def test_missing_future_window_does_not_disable_existing_extractors(self):
+        module = load_module(include_future_window=False)
+        self.addCleanup(lambda: module._test_temp_dir.cleanup())
+
+        self.assertNotEqual(module.run_booking_maintenance.__name__, "_missing")
+        self.assertNotEqual(module.run_booking_historical.__name__, "_missing")
+        self.assertEqual(module.run_booking_future_window.__name__, "_missing")
 
     def test_recover_session_with_fresh_context_targets_report_list(self):
         self.module.REI_USERNAME = "victor@example.com"

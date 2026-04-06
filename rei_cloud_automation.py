@@ -47,18 +47,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import new booking extractor
+def _missing_booking_extractor(name):
+    def _missing(*args, **kwargs):
+        logger.error("Booking extraction function '%s' is not implemented.", name)
+    return _missing
+
+
 try:
-    from booking_data_extractor import (
-        run_daily_maintenance as run_booking_maintenance,
-        run_future_window as run_booking_future_window,
-        run_historical as run_booking_historical,
-    )
+    import booking_data_extractor as booking_extractor
 except ImportError:
     logger.warning("Could not import booking_data_extractor. Some features will be disabled.")
-    def run_booking_maintenance(): logger.error("Booking extraction not implemented.")
-    def run_booking_future_window(*args, **kwargs): logger.error("Booking extraction not implemented.")
-    def run_booking_historical(): logger.error("Booking extraction not implemented.")
+    run_booking_maintenance = _missing_booking_extractor("run_daily_maintenance")
+    run_booking_future_window = _missing_booking_extractor("run_future_window")
+    run_booking_historical = _missing_booking_extractor("run_historical")
+else:
+    run_booking_maintenance = getattr(
+        booking_extractor,
+        "run_daily_maintenance",
+        _missing_booking_extractor("run_daily_maintenance"),
+    )
+    run_booking_future_window = getattr(
+        booking_extractor,
+        "run_future_window",
+        _missing_booking_extractor("run_future_window"),
+    )
+    run_booking_historical = getattr(
+        booking_extractor,
+        "run_historical",
+        _missing_booking_extractor("run_historical"),
+    )
 
 # Globals
 playwright_instance = None
