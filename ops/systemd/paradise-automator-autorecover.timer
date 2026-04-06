@@ -1,0 +1,12 @@
+[Unit]
+Description=Check whether Paradise Automator missed its daily run
+Documentation=file:///opt/paradise/paradise-automator/docs/OPS_AUTOMATION_HARDENING.md
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=5m
+Persistent=true
+Unit=paradise-automator-autorecover.service
+
+[Install]
+WantedBy=timers.target

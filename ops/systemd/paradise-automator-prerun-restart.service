@@ -1,0 +1,13 @@
+[Unit]
+Description=Restart Paradise Automator before the daily run window
+Documentation=file:///opt/paradise/paradise-automator/docs/OPS_AUTOMATION_HARDENING.md
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/systemctl restart paradise-automator.service
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paradise-automator-prerun-restart

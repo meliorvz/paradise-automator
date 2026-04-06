@@ -47,18 +47,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import new booking extractor
+def _missing_booking_extractor(name):
+    def _missing(*args, **kwargs):
+        logger.error("Booking extraction function '%s' is not implemented.", name)
+    return _missing
+
+
 try:
-    from booking_data_extractor import (
-        run_daily_maintenance as run_booking_maintenance,
-        run_future_window as run_booking_future_window,
-        run_historical as run_booking_historical,
-    )
+    import booking_data_extractor as booking_extractor
 except ImportError:
     logger.warning("Could not import booking_data_extractor. Some features will be disabled.")
-    def run_booking_maintenance(): logger.error("Booking extraction not implemented.")
-    def run_booking_future_window(*args, **kwargs): logger.error("Booking extraction not implemented.")
-    def run_booking_historical(): logger.error("Booking extraction not implemented.")
+    run_booking_maintenance = _missing_booking_extractor("run_daily_maintenance")
+    run_booking_future_window = _missing_booking_extractor("run_future_window")
+    run_booking_historical = _missing_booking_extractor("run_historical")
+else:
+    run_booking_maintenance = getattr(
+        booking_extractor,
+        "run_daily_maintenance",
+        _missing_booking_extractor("run_daily_maintenance"),
+    )
+    run_booking_future_window = getattr(
+        booking_extractor,
+        "run_future_window",
+        _missing_booking_extractor("run_future_window"),
+    )
+    run_booking_historical = getattr(
+        booking_extractor,
+        "run_historical",
+        _missing_booking_extractor("run_historical"),
+    )
 
 # Globals
 playwright_instance = None
@@ -71,12 +88,7 @@ def cleanup(signum=None, frame=None):
     """Clean shutdown."""
     logger.info("\nShutting down...")
     try:
-        if context:
-            context.close()
-        if browser:
-            browser.close()
-        if playwright_instance:
-            playwright_instance.stop()
+        close_browser_context()
     except:
         pass
     sys.exit(0)
@@ -103,6 +115,8 @@ WEEKLY_GRACE_PERIOD_MINUTES = 10
 BOOKING_FUTURE_WINDOW_DAYS_BACK = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_BACK", "30"))
 BOOKING_FUTURE_WINDOW_DAYS_AHEAD = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_AHEAD", "90"))
 BOOKING_FUTURE_WINDOW_OUTPUT = os.getenv("BOOKING_FUTURE_WINDOW_OUTPUT", "all_bookings_future_window.csv")
+REPORT_LIST_URL = "https://app.reimasterapps.com.au/report/reportlist?reicid=758"
+LOGIN_URL_HINTS = ("b2clogin", "/login", "/account")
 
 
 def run_booking_future_snapshot():
@@ -112,6 +126,230 @@ def run_booking_future_snapshot():
         days_ahead=BOOKING_FUTURE_WINDOW_DAYS_AHEAD,
         output_file=BOOKING_FUTURE_WINDOW_OUTPUT,
     )
+
+
+def close_browser_context():
+    """Close the current browser context and Playwright runtime if present."""
+    global playwright_instance, browser, context, page
+
+    try:
+        if context:
+            context.close()
+    except Exception as exc:
+        logger.debug(f"Error closing browser context: {exc}")
+
+    try:
+        if browser:
+            browser.close()
+    except Exception as exc:
+        logger.debug(f"Error closing browser: {exc}")
+
+    try:
+        if playwright_instance:
+            playwright_instance.stop()
+    except Exception as exc:
+        logger.debug(f"Error stopping Playwright: {exc}")
+
+    playwright_instance = None
+    browser = None
+    context = None
+    page = None
+
+
+def _locator_is_visible(target_page, selector):
+    """Return True if a locator exists and is visible."""
+    try:
+        locator = target_page.locator(selector)
+        if locator.count() == 0:
+            return False
+        return locator.first.is_visible()
+    except Exception:
+        return False
+
+
+def page_is_login_page(target_page):
+    """Detect the Azure B2C login page using URL and visible form elements."""
+    if not target_page:
+        return True
+
+    try:
+        current_url = target_page.url.lower()
+    except Exception:
+        current_url = ""
+
+    if any(hint in current_url for hint in LOGIN_URL_HINTS):
+        return True
+
+    if _locator_is_visible(target_page, "input#email") and _locator_is_visible(target_page, "input#password"):
+        return True
+
+    try:
+        content = (target_page.content() or "").lower()
+    except Exception:
+        content = ""
+
+    return "member login" in content or ("password" in content and "email address" in content)
+
+
+def page_is_dashboard_ready(target_page):
+    """Verify that the authenticated dashboard page is visible."""
+    if page_is_login_page(target_page):
+        return False
+
+    try:
+        current_url = target_page.url.lower()
+    except Exception:
+        return False
+
+    if "reimasterapps.com.au" not in current_url:
+        return False
+
+    return _locator_is_visible(target_page, "text=Dashboard")
+
+
+def page_is_report_list_ready(target_page, report_label="Arrival Report"):
+    """Verify that the report list is open and report links are visible."""
+    if page_is_login_page(target_page):
+        return False
+
+    try:
+        current_url = target_page.url.lower()
+    except Exception:
+        return False
+
+    if "reportlist" not in current_url:
+        return False
+
+    return _locator_is_visible(target_page, f"text={report_label}")
+
+
+def page_is_authenticated_session(target_page):
+    """Verify that the browser is on any authenticated protected page."""
+    return page_is_dashboard_ready(target_page) or page_is_report_list_ready(target_page)
+
+
+def launch_browser_context():
+    """Start Playwright and browser with the persistent profile."""
+    global playwright_instance, browser, context, page
+
+    playwright_instance = sync_playwright().start()
+
+    user_data_dir = os.path.expanduser("~/.rei-browser-profile")
+    if not os.path.exists(user_data_dir):
+        os.makedirs(user_data_dir)
+
+    logger.info(f"Using browser profile: {user_data_dir}")
+
+    context = playwright_instance.chromium.launch_persistent_context(
+        user_data_dir=user_data_dir,
+        headless=False,
+        viewport={"width": 1280, "height": 800},
+        accept_downloads=True,
+        args=["--disable-blink-features=AutomationControlled"]
+    )
+
+    page = context.pages[0] if context.pages else context.new_page()
+
+
+def setup_browser():
+    """Start Playwright and Browser."""
+    launch_browser_context()
+
+
+def recover_session_with_fresh_context(reason, target="dashboard", report_label="Arrival Report"):
+    """Recycle the Playwright context and verify authenticated access again."""
+    global page
+
+    logger.info(f"Recycling browser context for verified re-authentication ({reason})...")
+    close_browser_context()
+    launch_browser_context()
+
+    try:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        raise RuntimeError(f"Fresh-context navigation to dashboard failed: {nav_error}")
+
+    if page_is_login_page(page):
+        if not REI_USERNAME or not REI_PASSWORD:
+            raise RuntimeError("Fresh-context recovery reached login page but no REI credentials are configured.")
+
+        if not auto_login():
+            raise RuntimeError("Fresh-context auto-login failed.")
+
+        page.wait_for_timeout(3000)
+
+    if target == "report_list":
+        page.goto(REPORT_LIST_URL, timeout=30000)
+        page.wait_for_timeout(3000)
+        if not page_is_report_list_ready(page, report_label=report_label):
+            raise RuntimeError("Fresh-context report list verification failed.")
+    else:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+        if not page_is_dashboard_ready(page):
+            raise RuntimeError("Fresh-context dashboard verification failed.")
+
+    return True
+
+
+def ensure_dashboard_ready(allow_recovery=True, recovery_reason="dashboard preflight"):
+    """Open the dashboard and verify authenticated access."""
+    global page
+
+    if not page:
+        launch_browser_context()
+
+    try:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        logger.warning(f"Dashboard navigation failed: {nav_error}")
+        if allow_recovery:
+            return recover_session_with_fresh_context(recovery_reason, target="dashboard")
+        raise
+
+    if page_is_dashboard_ready(page):
+        return True
+
+    if page_is_login_page(page):
+        logger.warning("Dashboard preflight landed on login page.")
+        if REI_USERNAME and REI_PASSWORD:
+            if auto_login() and page_is_dashboard_ready(page):
+                return True
+
+    if allow_recovery:
+        return recover_session_with_fresh_context(recovery_reason, target="dashboard")
+
+    return False
+
+
+def ensure_report_list_ready(report_label="Arrival Report", allow_recovery=True, recovery_reason="report preflight"):
+    """Open the report list and verify the requested report link is visible."""
+    global page
+
+    if not ensure_dashboard_ready(allow_recovery=allow_recovery, recovery_reason=recovery_reason):
+        return False
+
+    try:
+        page.goto(REPORT_LIST_URL, timeout=30000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        logger.warning(f"Report list navigation failed: {nav_error}")
+        if allow_recovery:
+            return recover_session_with_fresh_context(recovery_reason, target="report_list", report_label=report_label)
+        raise
+
+    if page_is_report_list_ready(page, report_label=report_label):
+        return True
+
+    if page_is_login_page(page):
+        logger.warning("Report list preflight landed on login page.")
+
+    if allow_recovery:
+        return recover_session_with_fresh_context(recovery_reason, target="report_list", report_label=report_label)
+
+    return False
 
 
 def load_state():
@@ -411,10 +649,8 @@ def run_daily_report():
     logger.info("=" * 60)
     
     try:
-        # Go to Report List
-        logger.info("Navigating to Report List...")
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Arrival Report", recovery_reason="daily report preflight"):
+            raise RuntimeError("Daily report preflight failed before Arrival Report was available.")
         
         # ===== ARRIVAL REPORT =====
         logger.info("Generating Arrival Report for tomorrow...")
@@ -424,7 +660,7 @@ def run_daily_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto(REPORT_LIST_URL)
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -507,8 +743,8 @@ def run_daily_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Departure Report", recovery_reason="daily report departure preflight"):
+            raise RuntimeError("Daily report preflight failed before Departure Report was available.")
         
         # ===== DEPARTURE REPORT =====
         logger.info("Generating Departure Report for tomorrow...")
@@ -640,10 +876,8 @@ def run_weekly_report():
     logger.info("=" * 60)
     
     try:
-        # Go to Report List
-        logger.info("Navigating to Report List...")
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Arrival Report", recovery_reason="weekly report preflight"):
+            raise RuntimeError("Weekly report preflight failed before Arrival Report was available.")
         
         # ===== ARRIVAL REPORT (WEEKLY) =====
         logger.info("Generating Arrival Report for next 7 days...")
@@ -653,7 +887,7 @@ def run_weekly_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto(REPORT_LIST_URL)
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -734,8 +968,8 @@ def run_weekly_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Departure Report", recovery_reason="weekly report departure preflight"):
+            raise RuntimeError("Weekly report preflight failed before Departure Report was available.")
         
         # ===== DEPARTURE REPORT (WEEKLY) =====
         logger.info("Generating Departure Report for next 7 days...")
@@ -900,40 +1134,27 @@ def heartbeat_check():
         # Step 1: Navigate to Reports page first (generates server activity)
         try:
             logger.info("  → Navigating to Reports page...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto(REPORT_LIST_URL, timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Reports failed: {nav_error}")
         
-        # Check for login redirect after Reports page
-        current_url = page.url.lower()
-        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
+        if page_is_login_page(page) or not page_is_report_list_ready(page, report_label="Arrival Report"):
             raise Exception("Session expired - redirected to login page")
         
         # Step 2: Navigate back to Dashboard (second navigation = more activity)
         try:
             logger.info("  → Navigating back to Dashboard...")
-            page.goto("https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
+            page.goto(REI_CLOUD_URL, timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Dashboard failed: {nav_error}")
         
-        # Check 3: Are we on the login page? (indicates session expired)
-        current_url = page.url.lower()
-        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
+        if page_is_login_page(page):
             raise Exception("Session expired - redirected to login page")
         
-        # Check 4: Look for a known dashboard element to confirm we're logged in
-        try:
-            # Look for the Dashboard title or any element that only shows when logged in
-            dashboard_visible = page.locator("text=Dashboard").first.is_visible(timeout=5000)
-            if not dashboard_visible:
-                raise Exception("Dashboard element not found - may not be authenticated")
-        except:
-            # Try alternative check
-            page_content = page.content()
-            if "login" in page_content.lower() and "password" in page_content.lower():
-                raise Exception("Login form detected - session expired")
+        if not page_is_dashboard_ready(page):
+            raise Exception("Dashboard element not found - may not be authenticated")
         
         logger.info("✓ Heartbeat OK - Session active and kept alive")
         return True
@@ -945,11 +1166,12 @@ def heartbeat_check():
         # Attempt auto re-login before alerting
         if REI_USERNAME and REI_PASSWORD:
             logger.info("🔄 Attempting automatic re-login...")
-            if auto_login():
-                logger.info("✓ Re-login successful! Session restored.")
-                return True
-            else:
-                logger.error("❌ Re-login failed!")
+            try:
+                if recover_session_with_fresh_context("heartbeat", target="dashboard"):
+                    logger.info("✓ Re-login successful! Session restored.")
+                    return True
+            except Exception as recovery_err:
+                logger.error(f"❌ Re-login failed! {recovery_err}")
         
         # Re-login failed or no credentials - send alert
         alert_msg = f"HEARTBEAT FAILED: {str(e)} - Auto re-login also failed or not configured."
@@ -1004,15 +1226,16 @@ def auto_login():
             page.wait_for_timeout(3000)
             
             # Check if we're already logged in
-            current_url = page.url.lower()
-            if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
+            if page_is_authenticated_session(page):
                 logger.info("✓ Already logged in!")
                 return True
             
             # Check if we're on a login page (Azure B2C)
-            if "b2clogin" not in current_url and "login" not in current_url:
-                logger.info("Not on login page - may already be logged in")
-                return True
+            if not page_is_login_page(page):
+                logger.info("Not on login page, but protected state is not yet verified.")
+                if attempt < max_attempts:
+                    continue
+                return False
             
             # Wait for the email field to be visible (confirms page is ready)
             logger.info("  → Waiting for login form...")
@@ -1058,15 +1281,12 @@ def auto_login():
             page.wait_for_timeout(5000)
             
             # Check where we are now
-            current_url = page.url.lower()
-            
-            # Success - landed on REI Cloud
-            if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
+            if page_is_authenticated_session(page):
                 logger.info("✓ Auto-login successful!")
                 return True
             
             # Still on login page - check for actual visible errors
-            if "b2clogin" in current_url or "login" in current_url:
+            if page_is_login_page(page):
                 # Azure B2C shows errors in a specific error element, not just anywhere on the page
                 # Check for visible error messages using known B2C error selectors
                 try:
@@ -1101,6 +1321,10 @@ def auto_login():
                 # No visible error, might just need another attempt (Azure B2C quirk)
                 logger.info(f"  Still on login page, will retry...")
                 continue
+            if attempt < max_attempts:
+                logger.info("  Login state not yet verified, will retry...")
+                continue
+            return False
                 
         except Exception as e:
             logger.error(f"Auto-login attempt {attempt} error: {e}")
@@ -1127,35 +1351,6 @@ def input_listener(stop_event, trigger_daily_event, trigger_weekly_event):
                 logger.info("Type 'run_d' for daily report or 'run_w' for weekly report.")
         except:
             break
-
-def setup_browser():
-    """Start Playwright and Browser."""
-    global playwright_instance, browser, context, page
-    
-    playwright_instance = sync_playwright().start()
-    
-    # Use persistent context to save login state
-    user_data_dir = os.path.expanduser("~/.rei-browser-profile")
-    if not os.path.exists(user_data_dir):
-        os.makedirs(user_data_dir)
-        
-    logger.info(f"Using browser profile: {user_data_dir}")
-    
-    # Launch with persistent context
-    context = playwright_instance.chromium.launch_persistent_context(
-        user_data_dir=user_data_dir,
-        headless=False,
-        viewport={"width": 1280, "height": 800},
-        accept_downloads=True,
-        args=["--disable-blink-features=AutomationControlled"]
-    )
-    
-    page = context.pages[0] if context.pages else context.new_page()
-
-    # Handle new tabs (popups) by adding them to context tracking if strictly needed,
-    # but our logic now handles new_page_info which is better.
-    # We remove the aggressive popup handler that forced closing.
-
 
 def main():
     global page
@@ -1191,28 +1386,15 @@ def main():
     page.goto(REI_CLOUD_URL, timeout=60000)
     
     # Check if already logged in (quick check by URL)
-    is_logged_in = False
-    try:
-        if "Dashboard" in page.url or "reimasterapps.com.au" in page.url and "b2clogin" not in page.url:
-            is_logged_in = True
-    except:
-        pass
+    is_logged_in = page_is_authenticated_session(page)
     
     # Try auto-login if not logged in and credentials are available
     if not is_logged_in and REI_USERNAME and REI_PASSWORD:
         logger.info("Credentials found in .env - attempting auto-login...")
         if auto_login():
-            is_logged_in = True
             # Give it a moment to fully load dashboard
             page.wait_for_timeout(3000)
-            # Verify we're on dashboard
-            try:
-                if "Dashboard" in page.url or ("reimasterapps.com.au" in page.url and "b2clogin" not in page.url):
-                    is_logged_in = True
-                else:
-                    is_logged_in = False
-            except:
-                is_logged_in = False
+            is_logged_in = page_is_authenticated_session(page)
     
     logger.info("")
     logger.info("=" * 60)
@@ -1229,6 +1411,8 @@ def main():
         logger.info("come back here and press ENTER to continue...")
         logger.info("=" * 60)
         sys.stdin.readline()  # Wait for Enter
+        page.wait_for_timeout(3000)
+        is_logged_in = page_is_authenticated_session(page)
     
     logger.info("✓ Starting automation engine...")
     
