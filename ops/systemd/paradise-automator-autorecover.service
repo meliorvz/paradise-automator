@@ -1,0 +1,15 @@
+[Unit]
+Description=Paradise Automator overdue-run auto-recovery
+Documentation=file:///opt/paradise/paradise-automator/docs/OPS_AUTOMATION_HARDENING.md
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/paradise/paradise-automator
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/paradise/paradise-automator/venv/bin/python /opt/paradise/paradise-automator/scripts/auto_recover_if_overdue.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paradise-automator-autorecover

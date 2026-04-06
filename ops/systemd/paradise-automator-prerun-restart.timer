@@ -1,0 +1,11 @@
+[Unit]
+Description=Restart Paradise Automator before the daily report window
+Documentation=file:///opt/paradise/paradise-automator/docs/OPS_AUTOMATION_HARDENING.md
+
+[Timer]
+OnCalendar=*-*-* 02:45:00 UTC
+Persistent=true
+Unit=paradise-automator-prerun-restart.service
+
+[Install]
+WantedBy=timers.target
