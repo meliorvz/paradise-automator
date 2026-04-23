@@ -26,13 +26,15 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 API_URL = os.getenv("COMMS_API_URL", "https://comms-centre-prod.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
 API_KEY = os.getenv("COMMS_API_KEY", "")
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "comms").strip().lower()
+DEFAULT_EMAIL_PROVIDER = "resend"
+DEFAULT_ALERT_PROVIDERS = "brrr,comms"
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", DEFAULT_EMAIL_PROVIDER).strip().lower()
 EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
 EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
 SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
 ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61402526638")  # Default from user
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Numeric Telegram Chat ID
-ALERT_PROVIDERS = os.getenv("ALERT_PROVIDERS", "comms")
+ALERT_PROVIDERS = os.getenv("ALERT_PROVIDERS", DEFAULT_ALERT_PROVIDERS)
 
 
 def encode_file_base64(file_path: str) -> str:
@@ -60,8 +62,8 @@ def parse_csv_list(value: str) -> list[str]:
 
 
 def selected_alert_providers() -> list[str]:
-    providers = [p.lower() for p in parse_csv_list(os.getenv("ALERT_PROVIDERS", ALERT_PROVIDERS) or "comms")]
-    return providers or ["comms"]
+    providers = [p.lower() for p in parse_csv_list(os.getenv("ALERT_PROVIDERS", ALERT_PROVIDERS) or DEFAULT_ALERT_PROVIDERS)]
+    return providers or parse_csv_list(DEFAULT_ALERT_PROVIDERS)
 
 
 def send_email_via_comms_centre(
@@ -226,9 +228,12 @@ def send_email_message(
     attachment_paths: list[str],
     to_emails: list[str] = None
 ) -> bool:
-    provider = (os.getenv("EMAIL_PROVIDER", EMAIL_PROVIDER) or "comms").strip().lower()
+    provider = (os.getenv("EMAIL_PROVIDER", EMAIL_PROVIDER) or DEFAULT_EMAIL_PROVIDER).strip().lower()
     if provider == "resend":
-        return send_email_via_resend(subject, body, html_body, attachment_paths, to_emails)
+        if send_email_via_resend(subject, body, html_body, attachment_paths, to_emails):
+            return True
+        logger.warning("Resend email failed. Falling back to Comms Centre email delivery.")
+        return send_email_via_comms_centre(subject, body, html_body, attachment_paths, to_emails)
     if provider not in {"comms", "comms_centre", "integration_api"}:
         logger.warning("Unknown EMAIL_PROVIDER '%s'. Falling back to Comms Centre.", provider)
     return send_email_via_comms_centre(subject, body, html_body, attachment_paths, to_emails)

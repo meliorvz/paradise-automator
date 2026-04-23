@@ -2,9 +2,8 @@
 """
 Outbound communications clients for Paradise Automator.
 
-The existing Comms Centre integration remains the default. Resend is used for
-report email delivery when EMAIL_PROVIDER=resend, and Brrr can be added for
-failure alerts via ALERT_PROVIDERS.
+The existing Comms Centre integration remains available as fallback. Resend is
+the default report email provider, and Brrr is the primary failure-alert path.
 """
 
 from __future__ import annotations
