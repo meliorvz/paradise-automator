@@ -5,7 +5,7 @@ import api_email_sender
 
 
 class ApiEmailSenderProviderTests(unittest.TestCase):
-    def test_default_email_provider_is_resend_with_comms_fallback(self) -> None:
+    def test_email_provider_default_ignores_stale_module_snapshot(self) -> None:
         with patch.dict(api_email_sender.os.environ, {}, clear=True):
             with patch.object(api_email_sender, "EMAIL_PROVIDER", "comms"):
                 with patch.object(api_email_sender, "send_email_via_resend", return_value=False) as resend:
@@ -36,7 +36,7 @@ class ApiEmailSenderProviderTests(unittest.TestCase):
         resend.assert_not_called()
         comms.assert_called_once()
 
-    def test_default_alert_providers_include_brrr_and_comms(self) -> None:
+    def test_alert_provider_defaults_ignore_stale_module_snapshot(self) -> None:
         with patch.dict(api_email_sender.os.environ, {}, clear=True):
             with patch.object(api_email_sender, "ALERT_PROVIDERS", "comms"):
                 self.assertEqual(api_email_sender.selected_alert_providers(), ["brrr", "comms"])
