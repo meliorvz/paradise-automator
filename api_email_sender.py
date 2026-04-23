@@ -12,6 +12,13 @@ from pathlib import Path
 from datetime import date
 from dotenv import load_dotenv
 
+from comms_client import (
+    DEFAULT_RESEND_API_URL,
+    DEFAULT_RESEND_FROM,
+    build_brrr_alert_client,
+    build_resend_email_client,
+)
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -19,11 +26,13 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 API_URL = os.getenv("COMMS_API_URL", "https://comms-centre-prod.ancient-fire-eaa9.workers.dev/api/integrations/v1/send")
 API_KEY = os.getenv("COMMS_API_KEY", "")
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "comms").strip().lower()
 EMAIL_TO = os.getenv("EMAIL_TO", "")  # Comma-separated list
 EMAIL_CC = os.getenv("EMAIL_CC", "")  # Comma-separated CC list
 SMS_SENDER_NOTIFY = os.getenv("SMS_SENDER_NOTIFY", "")  # E164 format
 ESCALATION_PHONE = os.getenv("ESCALATION_PHONE", "+61402526638")  # Default from user
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Numeric Telegram Chat ID
+ALERT_PROVIDERS = os.getenv("ALERT_PROVIDERS", "comms")
 
 
 def encode_file_base64(file_path: str) -> str:
@@ -44,6 +53,15 @@ def get_mime_type(file_path: str) -> str:
         ".jpeg": "image/jpeg",
     }
     return mime_types.get(ext, "application/octet-stream")
+
+
+def parse_csv_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def selected_alert_providers() -> list[str]:
+    providers = [p.lower() for p in parse_csv_list(os.getenv("ALERT_PROVIDERS", ALERT_PROVIDERS) or "comms")]
+    return providers or ["comms"]
 
 
 def send_email_via_comms_centre(
@@ -141,6 +159,79 @@ def send_email_via_comms_centre(
     except Exception as e:
         logger.error(f"Comms Centre API request failed: {e}")
         return False
+
+
+def send_email_via_resend(
+    subject: str,
+    body: str,
+    html_body: str,
+    attachment_paths: list[str],
+    to_emails: list[str] = None
+) -> bool:
+    """
+    Send an email with multiple base64-encoded attachments via Resend.
+    """
+    client = build_resend_email_client()
+    config = client.config
+
+    if not config.has_api_key:
+        logger.error("RESEND_API_KEY not configured in .env")
+        return False
+
+    recipients = to_emails or parse_csv_list(EMAIL_TO)
+    if not recipients:
+        logger.error("No recipients configured (EMAIL_TO)")
+        return False
+
+    attachments = []
+    for file_path in attachment_paths:
+        if not os.path.exists(file_path):
+            logger.warning(f"Attachment not found: {file_path}")
+            continue
+
+        attachments.append({
+            "filename": Path(file_path).name,
+            "content": encode_file_base64(file_path),
+        })
+
+    cc_list = parse_csv_list(EMAIL_CC)
+    logger.info(f"Sending email via Resend: POST {config.api_url}")
+    logger.info(f"From {config.from_email}; targeting {len(recipients)} recipient(s) with {len(attachments)} attachment(s)...")
+
+    result = client.send_email(
+        subject=subject,
+        text=body,
+        html=html_body,
+        to=recipients,
+        cc=cc_list,
+        attachments=attachments,
+        timeout=60,
+        retry_total=3,
+    )
+    if result.error:
+        logger.error(f"Resend request failed: {result.error}")
+        return False
+    if result.success:
+        logger.info(f"Resend: Email accepted with id {((result.response_json or {}).get('id') or 'unknown')}")
+        return True
+
+    logger.error(f"Resend API error: {result.status_code} - {result.response_text}")
+    return False
+
+
+def send_email_message(
+    subject: str,
+    body: str,
+    html_body: str,
+    attachment_paths: list[str],
+    to_emails: list[str] = None
+) -> bool:
+    provider = (os.getenv("EMAIL_PROVIDER", EMAIL_PROVIDER) or "comms").strip().lower()
+    if provider == "resend":
+        return send_email_via_resend(subject, body, html_body, attachment_paths, to_emails)
+    if provider not in {"comms", "comms_centre", "integration_api"}:
+        logger.warning("Unknown EMAIL_PROVIDER '%s'. Falling back to Comms Centre.", provider)
+    return send_email_via_comms_centre(subject, body, html_body, attachment_paths, to_emails)
 
 
 def parse_csv(file_path: str) -> list[dict]:
@@ -484,7 +575,7 @@ See the email content for the detailed list.
             attachments.append(p)
     
     # === STEP 1: Send Email to Recipients ===
-    email_success = send_email_via_comms_centre(subject, body, html_body, attachments)
+    email_success = send_email_message(subject, body, html_body, attachments)
     
     # === STEP 2: SMS Summary to Sender (if configured) ===
     sms_success = False
@@ -591,7 +682,28 @@ def send_telegram_notification(message: str) -> bool:
         return False
 
 
-def send_failure_alert(error_message: str) -> bool:
+def send_failure_alert_via_brrr(error_message: str) -> bool:
+    """Send a failure notification via Brrr."""
+    body = f"URGENT: REI Automation FAILED\n\nError: {error_message}\n\nPlease check the server immediately."
+    client = build_brrr_alert_client()
+    result = client.send_alert(
+        title="REI Automation Failed",
+        body=body,
+        severity="error",
+        timeout=30,
+    )
+    if result.error:
+        logger.error(f"Brrr alert failed: {result.error}")
+        return False
+    if result.success:
+        logger.info("Brrr failure alert sent")
+        return True
+
+    logger.error(f"Brrr alert failed: {result.status_code} - {result.response_text}")
+    return False
+
+
+def send_failure_alert_via_comms(error_message: str) -> bool:
     """
     Send an urgent failure notification via SMS and Telegram.
     """
@@ -662,9 +774,30 @@ def send_failure_alert(error_message: str) -> bool:
     return sms_success or telegram_success
 
 
+def send_failure_alert(error_message: str) -> bool:
+    """Send a failure notification through the configured alert providers."""
+    providers = selected_alert_providers()
+    successes = []
+
+    for provider in providers:
+        if provider == "brrr":
+            successes.append(send_failure_alert_via_brrr(error_message))
+        elif provider in {"comms", "comms_centre", "integration_api"}:
+            successes.append(send_failure_alert_via_comms(error_message))
+        else:
+            logger.warning("Unknown alert provider '%s'. Skipping.", provider)
+
+    return any(successes)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("Comms Centre API Integration ready.")
     print(f"Endpoint: {API_URL}")
+    print(f"Email provider: {EMAIL_PROVIDER}")
+    print(f"Resend endpoint: {os.getenv('RESEND_API_URL', DEFAULT_RESEND_API_URL)}")
+    print(f"Resend sender: {os.getenv('RESEND_FROM', DEFAULT_RESEND_FROM)}")
+    print(f"Alert providers: {ALERT_PROVIDERS}")
     print(f"API Key configured: {'YES' if API_KEY else 'NO'}")
+    print(f"Resend API Key configured: {'YES' if os.getenv('RESEND_API_KEY') else 'NO'}")
     print(f"Recipients: {EMAIL_TO}")
