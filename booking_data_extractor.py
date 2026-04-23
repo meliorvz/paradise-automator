@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+from rei_auth_flow import auto_login as perform_auto_login
+from rei_credentials import get_rei_password, get_rei_totp, get_rei_username
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +37,28 @@ load_dotenv()
 
 REI_USERNAME = os.getenv("REI_USERNAME")
 REI_PASSWORD = os.getenv("REI_PASSWORD")
+REI_TOTP = os.getenv("REI_TOTP", "")
+
+
+def get_configured_rei_username():
+    return REI_USERNAME or get_rei_username(logger=logger)
+
+
+def get_configured_rei_password():
+    return REI_PASSWORD or get_rei_password(logger=logger)
+
+
+def get_configured_rei_totp():
+    return REI_TOTP or get_rei_totp(logger=logger)
+
+
+def page_is_authenticated_session(page):
+    try:
+        current_url = page.url.lower()
+    except Exception:
+        return False
+
+    return "reimasterapps.com.au" in current_url and "b2clogin" not in current_url and "login" not in current_url
 
 
 def search_filters_visible(page, timeout=5000):
@@ -267,66 +292,16 @@ def extract_all_result_rows(page):
 
 def auto_login(page):
     """Use the same Azure B2C retry pattern that works in the main service."""
-    if not REI_USERNAME or not REI_PASSWORD:
-        logger.error("No REI credentials configured for booking extraction.")
-        return False
-
-    logger.info("Attempting auto-login...")
-
     page.goto(REI_CLOUD_URL, timeout=60000)
-
-    for attempt in range(1, 3):
-        try:
-            page.wait_for_timeout(3000)
-
-            current_url = page.url.lower()
-            if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
-                logger.info("✓ Already logged in.")
-                return True
-
-            if "login" not in current_url and "b2clogin" not in current_url:
-                logger.info("Not on login page after navigation; treating session as authenticated.")
-                return True
-
-            logger.info(f"  Login attempt {attempt}/2...")
-            page.wait_for_selector("input#email", state="visible", timeout=10000)
-            page.fill("input#email", REI_USERNAME)
-            page.wait_for_timeout(500)
-            page.fill("input#password", REI_PASSWORD)
-            page.wait_for_timeout(500)
-            page.click("button#next")
-            page.wait_for_timeout(5000)
-        except Exception as e:
-            logger.error(f"Login failed: {e}")
-            return False
-
-        current_url = page.url.lower()
-        if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
-            logger.info("✓ Logged in successfully.")
-            return True
-
-        error_selectors = [
-            ".error.itemLevel",
-            ".error.pageLevel",
-            "#error",
-            ".error-message",
-            "[aria-live='polite'].error",
-        ]
-        for selector in error_selectors:
-            try:
-                error_elem = page.locator(selector)
-                if error_elem.count() > 0 and error_elem.first.is_visible():
-                    error_text = (error_elem.first.text_content() or "").strip()
-                    if error_text:
-                        logger.error(f"Login failed - error shown: {error_text}")
-                        return False
-            except Exception:
-                continue
-
-        logger.info("Still on login page after submit, retrying...")
-
-    logger.warning("Auto-login: max attempts reached, still on login page.")
-    return False
+    return perform_auto_login(
+        page,
+        is_authenticated_session=page_is_authenticated_session,
+        logger=logger,
+        max_attempts=3,
+        get_username=get_configured_rei_username,
+        get_password=get_configured_rei_password,
+        get_totp=get_configured_rei_totp,
+    )
 
 def extract_bookings(page, start_date, end_date, status="Departed", date_mode="Arrival"):
     """

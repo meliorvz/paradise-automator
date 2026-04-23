@@ -8,13 +8,18 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from rei_auth_flow import auto_login as perform_auto_login
+from rei_credentials import get_rei_password, get_rei_totp, get_rei_username
+
 # Setup paths
 os.chdir('/opt/paradise-automator')
 sys.path.insert(0, '/opt/paradise-automator')
 
 # Load env
 from dotenv import load_dotenv
-load_dotenv('/etc/paradise-automator/.env')
+load_dotenv()
+load_dotenv('/etc/paradise/paradise-automator.env', override=False)
+load_dotenv('/etc/paradise-automator/.env', override=False)
 
 # Logging
 logging.basicConfig(
@@ -33,8 +38,31 @@ DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/opt/paradise-automator/downloads
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 REI_CLOUD_URL = "https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758"
+REPORT_LIST_URL = "https://app.reimasterapps.com.au/report/reportlist?reicid=758"
 REI_USERNAME = os.getenv("REI_USERNAME", "")
 REI_PASSWORD = os.getenv("REI_PASSWORD", "")
+REI_TOTP = os.getenv("REI_TOTP", "")
+
+
+def get_configured_rei_username():
+    return REI_USERNAME or get_rei_username(logger=logger)
+
+
+def get_configured_rei_password():
+    return REI_PASSWORD or get_rei_password(logger=logger)
+
+
+def get_configured_rei_totp():
+    return REI_TOTP or get_rei_totp(logger=logger)
+
+
+def page_is_authenticated_session(page):
+    try:
+        current_url = page.url.lower()
+    except Exception:
+        return False
+
+    return "reimasterapps.com.au" in current_url and "b2clogin" not in current_url and "login" not in current_url
 
 def configure_report_options(target_page):
     """Enable 'Hide' options in the report modal."""
@@ -93,21 +121,22 @@ def run_weekly():
             page.wait_for_timeout(3000)
             
             # Check if logged in
-            if "login" in page.url.lower() or "b2clogin" in page.url.lower():
+            if not page_is_authenticated_session(page):
                 logger.info("Need to log in...")
-                # Try auto-login
-                if REI_USERNAME and REI_PASSWORD:
-                    page.wait_for_selector("input#email", state="visible", timeout=10000)
-                    page.locator("input#email").fill(REI_USERNAME)
-                    page.locator("input#password").fill(REI_PASSWORD)
-                    page.locator("button#next").click()
-                    page.wait_for_timeout(5000)
-                else:
-                    logger.error("Not logged in and no credentials configured")
+                if not perform_auto_login(
+                    page,
+                    is_authenticated_session=page_is_authenticated_session,
+                    logger=logger,
+                    max_attempts=3,
+                    get_username=get_configured_rei_username,
+                    get_password=get_configured_rei_password,
+                    get_totp=get_configured_rei_totp,
+                ):
+                    logger.error("Auto-login failed or no credentials are configured")
                     return False
             
             logger.info("✓ Logged in, navigating to Report List...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto(REPORT_LIST_URL, timeout=30000)
             page.wait_for_timeout(3000)
             
             # ===== ARRIVAL REPORT (WEEKLY) =====
@@ -169,7 +198,7 @@ def run_weekly():
             page.wait_for_timeout(2000)
             
             # Go back to Report List
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto(REPORT_LIST_URL, timeout=30000)
             page.wait_for_timeout(3000)
             
             # ===== DEPARTURE REPORT (WEEKLY) =====

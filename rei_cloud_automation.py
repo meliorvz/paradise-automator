@@ -14,6 +14,7 @@ import sys
 import logging
 import time
 import signal
+import subprocess
 import threading
 import json
 from datetime import datetime, timedelta
@@ -24,6 +25,13 @@ import schedule
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
+from rei_auth_flow import (
+    auto_login as perform_auto_login,
+    page_is_login_page as detect_login_page,
+    page_requires_totp,
+)
+from rei_credentials import get_rei_password, get_rei_totp, get_rei_username
+
 load_dotenv()
 
 # Configuration
@@ -33,6 +41,7 @@ REI_CLOUD_URL = "https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758
 # REI Cloud Credentials (optional - for auto-login)
 REI_USERNAME = os.getenv("REI_USERNAME", "")
 REI_PASSWORD = os.getenv("REI_PASSWORD", "")
+REI_TOTP = os.getenv("REI_TOTP", "")
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
@@ -47,18 +56,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import new booking extractor
+def _missing_booking_extractor(name):
+    def _missing(*args, **kwargs):
+        logger.error("Booking extraction function '%s' is not implemented.", name)
+    return _missing
+
+
 try:
-    from booking_data_extractor import (
-        run_daily_maintenance as run_booking_maintenance,
-        run_future_window as run_booking_future_window,
-        run_historical as run_booking_historical,
-    )
+    import booking_data_extractor as booking_extractor
 except ImportError:
     logger.warning("Could not import booking_data_extractor. Some features will be disabled.")
-    def run_booking_maintenance(): logger.error("Booking extraction not implemented.")
-    def run_booking_future_window(*args, **kwargs): logger.error("Booking extraction not implemented.")
-    def run_booking_historical(): logger.error("Booking extraction not implemented.")
+    run_booking_maintenance = _missing_booking_extractor("run_daily_maintenance")
+    run_booking_future_window = _missing_booking_extractor("run_future_window")
+    run_booking_historical = _missing_booking_extractor("run_historical")
+else:
+    run_booking_maintenance = getattr(
+        booking_extractor,
+        "run_daily_maintenance",
+        _missing_booking_extractor("run_daily_maintenance"),
+    )
+    run_booking_future_window = getattr(
+        booking_extractor,
+        "run_future_window",
+        _missing_booking_extractor("run_future_window"),
+    )
+    run_booking_historical = getattr(
+        booking_extractor,
+        "run_historical",
+        _missing_booking_extractor("run_historical"),
+    )
 
 # Globals
 playwright_instance = None
@@ -71,12 +97,7 @@ def cleanup(signum=None, frame=None):
     """Clean shutdown."""
     logger.info("\nShutting down...")
     try:
-        if context:
-            context.close()
-        if browser:
-            browser.close()
-        if playwright_instance:
-            playwright_instance.stop()
+        close_browser_context()
     except:
         pass
     sys.exit(0)
@@ -103,15 +124,293 @@ WEEKLY_GRACE_PERIOD_MINUTES = 10
 BOOKING_FUTURE_WINDOW_DAYS_BACK = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_BACK", "30"))
 BOOKING_FUTURE_WINDOW_DAYS_AHEAD = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_AHEAD", "90"))
 BOOKING_FUTURE_WINDOW_OUTPUT = os.getenv("BOOKING_FUTURE_WINDOW_OUTPUT", "all_bookings_future_window.csv")
+APP_DIR = Path(__file__).resolve().parent
+BOOKING_EXTRACTOR_SCRIPT = APP_DIR / "booking_data_extractor.py"
+REPORT_LIST_URL = "https://app.reimasterapps.com.au/report/reportlist?reicid=758"
+LOGIN_URL_HINTS = ("b2clogin", "/login", "/account")
+PAUSE_FILE = Path(os.getenv("AUTOMATION_PAUSE_FILE", "state/automation.paused"))
+NOTIFICATION_STATE_KEY = "notification_state"
+STARTUP_NOTIFICATION_CATEGORY = "startup"
+MISSED_DAILY_NOTIFICATION_CATEGORY = "missed_daily"
+MISSED_WEEKLY_NOTIFICATION_CATEGORY = "missed_weekly"
+
+
+def run_booking_extractor_subprocess(label, args, timeout_seconds=7200):
+    """Run booking extraction in a separate process so Playwright runtimes do not collide."""
+    cmd = [sys.executable, str(BOOKING_EXTRACTOR_SCRIPT), *args]
+    logger.info("Starting booking extractor subprocess: %s", label)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=APP_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception as exc:
+        logger.error("Booking extractor subprocess failed to start for %s: %s", label, exc)
+        return False
+
+    if result.stdout:
+        logger.info("Booking extractor stdout for %s:\n%s", label, result.stdout[-4000:])
+    if result.stderr:
+        logger.warning("Booking extractor stderr for %s:\n%s", label, result.stderr[-4000:])
+
+    if result.returncode != 0:
+        logger.error("Booking extractor subprocess failed for %s with exit code %s", label, result.returncode)
+        return False
+
+    logger.info("Booking extractor subprocess completed: %s", label)
+    return True
+
+
+def run_booking_maintenance_job():
+    """Run daily booking maintenance without crashing the main scheduler on Playwright errors."""
+    return run_booking_extractor_subprocess("daily maintenance", ["--maintenance"])
+
+
+def run_booking_historical_job():
+    """Run historical booking extraction without nesting Playwright in the main process."""
+    return run_booking_extractor_subprocess("historical extraction", ["--historical"])
 
 
 def run_booking_future_snapshot():
     """Extract a rolling arrival-window snapshot for downstream imports."""
-    run_booking_future_window(
-        days_back=BOOKING_FUTURE_WINDOW_DAYS_BACK,
-        days_ahead=BOOKING_FUTURE_WINDOW_DAYS_AHEAD,
-        output_file=BOOKING_FUTURE_WINDOW_OUTPUT,
+    return run_booking_extractor_subprocess(
+        "future window",
+        [
+            "--future-window",
+            "--days-back",
+            str(BOOKING_FUTURE_WINDOW_DAYS_BACK),
+            "--days-ahead",
+            str(BOOKING_FUTURE_WINDOW_DAYS_AHEAD),
+            "--future-output",
+            BOOKING_FUTURE_WINDOW_OUTPUT,
+        ],
     )
+
+
+def get_configured_rei_username():
+    return REI_USERNAME or get_rei_username(logger=logger)
+
+
+def get_configured_rei_password():
+    return REI_PASSWORD or get_rei_password(logger=logger)
+
+
+def get_configured_rei_totp():
+    return REI_TOTP or get_rei_totp(logger=logger)
+
+
+def has_configured_rei_credentials():
+    return bool(get_configured_rei_username() and get_configured_rei_password())
+
+
+def close_browser_context():
+    """Close the current browser context and Playwright runtime if present."""
+    global playwright_instance, browser, context, page
+
+    try:
+        if context:
+            context.close()
+    except Exception as exc:
+        logger.debug(f"Error closing browser context: {exc}")
+
+    try:
+        if browser:
+            browser.close()
+    except Exception as exc:
+        logger.debug(f"Error closing browser: {exc}")
+
+    try:
+        if playwright_instance:
+            playwright_instance.stop()
+    except Exception as exc:
+        logger.debug(f"Error stopping Playwright: {exc}")
+
+    playwright_instance = None
+    browser = None
+    context = None
+    page = None
+
+
+def _locator_is_visible(target_page, selector):
+    """Return True if a locator exists and is visible."""
+    try:
+        locator = target_page.locator(selector)
+        if locator.count() == 0:
+            return False
+        return locator.first.is_visible()
+    except Exception:
+        return False
+
+
+def page_is_login_page(target_page):
+    """Detect the Azure B2C login page using URL and visible form elements."""
+    return detect_login_page(target_page)
+
+
+def page_is_dashboard_ready(target_page):
+    """Verify that the authenticated dashboard page is visible."""
+    if page_is_login_page(target_page):
+        return False
+
+    try:
+        current_url = target_page.url.lower()
+    except Exception:
+        return False
+
+    if "reimasterapps.com.au" not in current_url:
+        return False
+
+    return _locator_is_visible(target_page, "text=Dashboard")
+
+
+def page_is_report_list_ready(target_page, report_label="Arrival Report"):
+    """Verify that the report list is open and report links are visible."""
+    if page_is_login_page(target_page):
+        return False
+
+    try:
+        current_url = target_page.url.lower()
+    except Exception:
+        return False
+
+    if "reportlist" not in current_url:
+        return False
+
+    return _locator_is_visible(target_page, f"text={report_label}")
+
+
+def page_is_authenticated_session(target_page):
+    """Verify that the browser is on any authenticated protected page."""
+    return page_is_dashboard_ready(target_page) or page_is_report_list_ready(target_page)
+
+
+def launch_browser_context():
+    """Start Playwright and browser with the persistent profile."""
+    global playwright_instance, browser, context, page
+
+    playwright_instance = sync_playwright().start()
+
+    user_data_dir = os.path.expanduser("~/.rei-browser-profile")
+    if not os.path.exists(user_data_dir):
+        os.makedirs(user_data_dir)
+
+    logger.info(f"Using browser profile: {user_data_dir}")
+
+    context = playwright_instance.chromium.launch_persistent_context(
+        user_data_dir=user_data_dir,
+        headless=False,
+        viewport={"width": 1280, "height": 800},
+        accept_downloads=True,
+        args=["--disable-blink-features=AutomationControlled"]
+    )
+
+    page = context.pages[0] if context.pages else context.new_page()
+
+
+def setup_browser():
+    """Start Playwright and Browser."""
+    launch_browser_context()
+
+
+def recover_session_with_fresh_context(reason, target="dashboard", report_label="Arrival Report"):
+    """Recycle the Playwright context and verify authenticated access again."""
+    global page
+
+    logger.info(f"Recycling browser context for verified re-authentication ({reason})...")
+    close_browser_context()
+    launch_browser_context()
+
+    try:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        raise RuntimeError(f"Fresh-context navigation to dashboard failed: {nav_error}")
+
+    if page_is_login_page(page) or page_requires_totp(page):
+        if not has_configured_rei_credentials():
+            raise RuntimeError("Fresh-context recovery reached login page but no REI credentials are configured.")
+
+        if not auto_login():
+            raise RuntimeError("Fresh-context auto-login failed.")
+
+        page.wait_for_timeout(3000)
+
+    if target == "report_list":
+        page.goto(REPORT_LIST_URL, timeout=30000)
+        page.wait_for_timeout(3000)
+        if not page_is_report_list_ready(page, report_label=report_label):
+            raise RuntimeError("Fresh-context report list verification failed.")
+    else:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+        if not page_is_dashboard_ready(page):
+            raise RuntimeError("Fresh-context dashboard verification failed.")
+
+    return True
+
+
+def ensure_dashboard_ready(allow_recovery=True, recovery_reason="dashboard preflight"):
+    """Open the dashboard and verify authenticated access."""
+    global page
+
+    if not page:
+        launch_browser_context()
+
+    try:
+        page.goto(REI_CLOUD_URL, timeout=60000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        logger.warning(f"Dashboard navigation failed: {nav_error}")
+        if allow_recovery:
+            return recover_session_with_fresh_context(recovery_reason, target="dashboard")
+        raise
+
+    if page_is_dashboard_ready(page):
+        return True
+
+    if page_is_login_page(page) or page_requires_totp(page):
+        logger.warning("Dashboard preflight landed on login page.")
+        if has_configured_rei_credentials():
+            if auto_login() and page_is_dashboard_ready(page):
+                return True
+
+    if allow_recovery:
+        return recover_session_with_fresh_context(recovery_reason, target="dashboard")
+
+    return False
+
+
+def ensure_report_list_ready(report_label="Arrival Report", allow_recovery=True, recovery_reason="report preflight"):
+    """Open the report list and verify the requested report link is visible."""
+    global page
+
+    if not ensure_dashboard_ready(allow_recovery=allow_recovery, recovery_reason=recovery_reason):
+        return False
+
+    try:
+        page.goto(REPORT_LIST_URL, timeout=30000)
+        page.wait_for_timeout(3000)
+    except Exception as nav_error:
+        logger.warning(f"Report list navigation failed: {nav_error}")
+        if allow_recovery:
+            return recover_session_with_fresh_context(recovery_reason, target="report_list", report_label=report_label)
+        raise
+
+    if page_is_report_list_ready(page, report_label=report_label):
+        return True
+
+    if page_is_login_page(page) or page_requires_totp(page):
+        logger.warning("Report list preflight landed on login page.")
+
+    if allow_recovery:
+        return recover_session_with_fresh_context(recovery_reason, target="report_list", report_label=report_label)
+
+    return False
 
 
 def load_state():
@@ -128,10 +427,113 @@ def load_state():
 def save_state(state):
     """Save the automation state."""
     try:
-        with open(STATE_FILE, "w") as f:
+        tmp_path = f"{STATE_FILE}.{os.getpid()}.tmp"
+        with open(tmp_path, "w") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp_path, STATE_FILE)
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
+
+
+def current_utc_time():
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(pytz.UTC)
+
+
+def brisbane_date_token():
+    """Return the current Brisbane-local date token used for daily dedupe."""
+    return datetime.now(BRISBANE_TZ).date().isoformat()
+
+
+def notification_state(state):
+    """Return the mutable notification tracking map within the automation state."""
+    return state.setdefault(NOTIFICATION_STATE_KEY, {})
+
+
+def record_notification_if_new(category, token):
+    """
+    Persist notification dedupe state.
+
+    Returns True only when this category/token combination has not been recorded
+    before, allowing callers to avoid re-alerting across service restarts.
+    """
+    state = load_state()
+    notifications = notification_state(state)
+    existing = notifications.get(category, {})
+
+    if existing.get("token") == token:
+        return False
+
+    notifications[category] = {
+        "token": token,
+        "sent_at": current_utc_time().isoformat(),
+    }
+    save_state(state)
+    return True
+
+
+def startup_notification_token():
+    """Return the dedupe token for startup notifications."""
+    return f"startup::{brisbane_date_token()}"
+
+
+def missed_daily_notification_token(next_expected_dt):
+    """Return the dedupe token for the current missed daily deadline."""
+    return f"missed-daily::{next_expected_dt.isoformat()}::{brisbane_date_token()}"
+
+
+def missed_weekly_notification_token(next_expected_dt):
+    """Return the dedupe token for the current missed weekly deadline."""
+    return f"missed-weekly::{next_expected_dt.isoformat()}::{brisbane_date_token()}"
+
+
+def is_automation_paused():
+    """Return True when the pause flag file is present."""
+    return PAUSE_FILE.exists()
+
+
+def wait_while_paused(poll_interval_seconds=5):
+    """Block startup until the external pause flag is removed."""
+    pause_logged = False
+
+    while is_automation_paused():
+        if not pause_logged:
+            logger.warning(
+                "Automation pause flag detected at %s. Waiting for it to be removed before startup.",
+                PAUSE_FILE,
+            )
+            pause_logged = True
+        time.sleep(poll_interval_seconds)
+
+    if pause_logged:
+        logger.info("Automation pause flag cleared. Continuing startup.")
+
+
+def should_send_startup_notification():
+    """
+    Decide whether a startup notification should be sent.
+
+    Startup pings are suppressed while the automation is paused, while the
+    system is already overdue, and when an identical startup ping has already
+    been recorded for the current Brisbane-local day.
+    """
+    if is_automation_paused():
+        logger.info("Skipping startup notification because the automation is paused.")
+        return False
+
+    is_past_daily_deadline, _, _ = is_past_deadline()
+    is_past_weekly_deadline_now, _, _ = is_past_weekly_deadline()
+
+    if is_past_daily_deadline or is_past_weekly_deadline_now:
+        logger.info("Skipping startup notification because the automation is already overdue.")
+        return False
+
+    token = startup_notification_token()
+    if not record_notification_if_new(STARTUP_NOTIFICATION_CATEGORY, token):
+        logger.info("Skipping duplicate startup notification for %s.", brisbane_date_token())
+        return False
+
+    return True
 
 
 def get_next_scheduled_time(from_time=None):
@@ -195,7 +597,7 @@ def save_successful_run():
     Record a successful run. Updates last_successful_run and calculates next_expected_run.
     Called after ANY successful run (scheduled or manual).
     """
-    now = datetime.now(pytz.UTC)  # Store in UTC
+    now = current_utc_time()  # Store in UTC
     state = load_state()
     state["last_successful_run"] = now.isoformat()
     state["next_expected_run"] = get_next_scheduled_time(now)
@@ -208,7 +610,7 @@ def save_successful_weekly_run():
     Record a successful weekly run. Updates last_successful_weekly_run and 
     calculates next_expected_weekly_run. Called after ANY successful weekly run.
     """
-    now = datetime.now(pytz.UTC)  # Store in UTC
+    now = current_utc_time()  # Store in UTC
     state = load_state()
     state["last_successful_weekly_run"] = now.isoformat()
     state["next_expected_weekly_run"] = get_next_weekly_scheduled_time(now)
@@ -318,7 +720,7 @@ def is_past_deadline():
             if last_success_dt.tzinfo is None:
                 last_success_dt = pytz.UTC.localize(last_success_dt)
         
-        now = datetime.now(pytz.UTC)  # Use UTC for comparison
+        now = current_utc_time()  # Use UTC for comparison
         is_past = now > deadline
         
         return is_past, next_run_dt, last_success_dt
@@ -353,7 +755,7 @@ def is_past_weekly_deadline():
             if last_success_dt.tzinfo is None:
                 last_success_dt = pytz.UTC.localize(last_success_dt)
         
-        now = datetime.now(pytz.UTC)  # Use UTC for comparison
+        now = current_utc_time()  # Use UTC for comparison
         is_past = now > deadline
         
         return is_past, next_run_dt, last_success_dt
@@ -411,10 +813,8 @@ def run_daily_report():
     logger.info("=" * 60)
     
     try:
-        # Go to Report List
-        logger.info("Navigating to Report List...")
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Arrival Report", recovery_reason="daily report preflight"):
+            raise RuntimeError("Daily report preflight failed before Arrival Report was available.")
         
         # ===== ARRIVAL REPORT =====
         logger.info("Generating Arrival Report for tomorrow...")
@@ -424,7 +824,7 @@ def run_daily_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto(REPORT_LIST_URL)
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -507,8 +907,8 @@ def run_daily_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Departure Report", recovery_reason="daily report departure preflight"):
+            raise RuntimeError("Daily report preflight failed before Departure Report was available.")
         
         # ===== DEPARTURE REPORT =====
         logger.info("Generating Departure Report for tomorrow...")
@@ -640,10 +1040,8 @@ def run_weekly_report():
     logger.info("=" * 60)
     
     try:
-        # Go to Report List
-        logger.info("Navigating to Report List...")
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Arrival Report", recovery_reason="weekly report preflight"):
+            raise RuntimeError("Weekly report preflight failed before Arrival Report was available.")
         
         # ===== ARRIVAL REPORT (WEEKLY) =====
         logger.info("Generating Arrival Report for next 7 days...")
@@ -653,7 +1051,7 @@ def run_weekly_report():
             page.click("text=Arrival Report", timeout=5000)
         except:
             logger.info("Retry clicking Arrival Report...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758")
+            page.goto(REPORT_LIST_URL)
             page.wait_for_timeout(3000)
             page.click("text=Arrival Report")
             
@@ -734,8 +1132,8 @@ def run_weekly_report():
         page.wait_for_timeout(2000)
         
         # Go back to Report List
-        page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
-        page.wait_for_timeout(3000)
+        if not ensure_report_list_ready(report_label="Departure Report", recovery_reason="weekly report departure preflight"):
+            raise RuntimeError("Weekly report preflight failed before Departure Report was available.")
         
         # ===== DEPARTURE REPORT (WEEKLY) =====
         logger.info("Generating Departure Report for next 7 days...")
@@ -900,40 +1298,27 @@ def heartbeat_check():
         # Step 1: Navigate to Reports page first (generates server activity)
         try:
             logger.info("  → Navigating to Reports page...")
-            page.goto("https://app.reimasterapps.com.au/report/reportlist?reicid=758", timeout=30000)
+            page.goto(REPORT_LIST_URL, timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Reports failed: {nav_error}")
         
-        # Check for login redirect after Reports page
-        current_url = page.url.lower()
-        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
+        if page_is_login_page(page) or page_requires_totp(page) or not page_is_report_list_ready(page, report_label="Arrival Report"):
             raise Exception("Session expired - redirected to login page")
         
         # Step 2: Navigate back to Dashboard (second navigation = more activity)
         try:
             logger.info("  → Navigating back to Dashboard...")
-            page.goto("https://app.reimasterapps.com.au/Customers/Dashboard?reicid=758", timeout=30000)
+            page.goto(REI_CLOUD_URL, timeout=30000)
             page.wait_for_timeout(2000)
         except Exception as nav_error:
             raise Exception(f"Navigation to Dashboard failed: {nav_error}")
         
-        # Check 3: Are we on the login page? (indicates session expired)
-        current_url = page.url.lower()
-        if "login" in current_url or "account" in current_url or "b2clogin" in current_url:
+        if page_is_login_page(page) or page_requires_totp(page):
             raise Exception("Session expired - redirected to login page")
         
-        # Check 4: Look for a known dashboard element to confirm we're logged in
-        try:
-            # Look for the Dashboard title or any element that only shows when logged in
-            dashboard_visible = page.locator("text=Dashboard").first.is_visible(timeout=5000)
-            if not dashboard_visible:
-                raise Exception("Dashboard element not found - may not be authenticated")
-        except:
-            # Try alternative check
-            page_content = page.content()
-            if "login" in page_content.lower() and "password" in page_content.lower():
-                raise Exception("Login form detected - session expired")
+        if not page_is_dashboard_ready(page):
+            raise Exception("Dashboard element not found - may not be authenticated")
         
         logger.info("✓ Heartbeat OK - Session active and kept alive")
         return True
@@ -943,13 +1328,14 @@ def heartbeat_check():
         logger.warning(error_msg)
         
         # Attempt auto re-login before alerting
-        if REI_USERNAME and REI_PASSWORD:
+        if has_configured_rei_credentials():
             logger.info("🔄 Attempting automatic re-login...")
-            if auto_login():
-                logger.info("✓ Re-login successful! Session restored.")
-                return True
-            else:
-                logger.error("❌ Re-login failed!")
+            try:
+                if recover_session_with_fresh_context("heartbeat", target="dashboard"):
+                    logger.info("✓ Re-login successful! Session restored.")
+                    return True
+            except Exception as recovery_err:
+                logger.error(f"❌ Re-login failed! {recovery_err}")
         
         # Re-login failed or no credentials - send alert
         alert_msg = f"HEARTBEAT FAILED: {str(e)} - Auto re-login also failed or not configured."
@@ -976,7 +1362,7 @@ def heartbeat_check():
 
 def auto_login():
     """
-    Automatically log in to REI Cloud using credentials from .env.
+    Automatically log in to REI Cloud using env credentials or 1Password-backed secrets.
     Handles the Azure B2C login flow, including the quirk where
     credentials need to be entered twice.
     
@@ -986,129 +1372,16 @@ def auto_login():
     - Submit: button#next (type="submit", text="Sign in")
     """
     global page
-    
-    if not REI_USERNAME or not REI_PASSWORD:
-        logger.info("No REI credentials configured - manual login required")
-        return False
-    
-    logger.info("Attempting auto-login to REI Cloud...")
-    
-    # Azure B2C sometimes requires entering credentials twice
-    max_attempts = 2
-    
-    for attempt in range(1, max_attempts + 1):
-        try:
-            logger.info(f"  Login attempt {attempt}/{max_attempts}...")
-            
-            # Wait for page to settle
-            page.wait_for_timeout(3000)
-            
-            # Check if we're already logged in
-            current_url = page.url.lower()
-            if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
-                logger.info("✓ Already logged in!")
-                return True
-            
-            # Check if we're on a login page (Azure B2C)
-            if "b2clogin" not in current_url and "login" not in current_url:
-                logger.info("Not on login page - may already be logged in")
-                return True
-            
-            # Wait for the email field to be visible (confirms page is ready)
-            logger.info("  → Waiting for login form...")
-            try:
-                page.wait_for_selector("input#email", state="visible", timeout=10000)
-            except Exception as e:
-                logger.error(f"Login form did not appear: {e}")
-                if attempt < max_attempts:
-                    continue
-                return False
-            
-            # Fill email field
-            logger.info("  → Filling in email...")
-            try:
-                email_field = page.locator("input#email")
-                email_field.fill(REI_USERNAME)
-                page.wait_for_timeout(500)
-            except Exception as e:
-                logger.error(f"Could not fill email field: {e}")
-                return False
-            
-            # Fill password field
-            logger.info("  → Filling in password...")
-            try:
-                password_field = page.locator("input#password")
-                password_field.fill(REI_PASSWORD)
-                page.wait_for_timeout(500)
-            except Exception as e:
-                logger.error(f"Could not fill password field: {e}")
-                return False
-            
-            # Click the Sign In button
-            logger.info("  → Clicking 'Sign in' button...")
-            try:
-                submit_btn = page.locator("button#next")
-                submit_btn.click()
-            except Exception as e:
-                logger.error(f"Could not click submit button: {e}")
-                return False
-            
-            # Wait for navigation
-            logger.info("  → Waiting for response...")
-            page.wait_for_timeout(5000)
-            
-            # Check where we are now
-            current_url = page.url.lower()
-            
-            # Success - landed on REI Cloud
-            if "reimasterapps.com.au" in current_url and "b2clogin" not in current_url:
-                logger.info("✓ Auto-login successful!")
-                return True
-            
-            # Still on login page - check for actual visible errors
-            if "b2clogin" in current_url or "login" in current_url:
-                # Azure B2C shows errors in a specific error element, not just anywhere on the page
-                # Check for visible error messages using known B2C error selectors
-                try:
-                    # Common Azure B2C error selectors
-                    error_selectors = [
-                        ".error.itemLevel",  # B2C item-level error
-                        ".error.pageLevel",  # B2C page-level error
-                        "#error",            # Generic error div
-                        ".error-message",    # Alternative error class
-                        "[aria-live='polite'].error"  # Accessible error
-                    ]
-                    
-                    has_visible_error = False
-                    for selector in error_selectors:
-                        try:
-                            error_elem = page.locator(selector)
-                            if error_elem.count() > 0 and error_elem.first.is_visible():
-                                error_text = error_elem.first.text_content() or ""
-                                if error_text.strip():  # Only count if there's actual text
-                                    logger.error(f"Login failed - error shown: {error_text.strip()}")
-                                    has_visible_error = True
-                                    break
-                        except:
-                            continue
-                    
-                    if has_visible_error:
-                        return False
-                        
-                except Exception as err_check:
-                    logger.debug(f"Error checking for login errors: {err_check}")
-                
-                # No visible error, might just need another attempt (Azure B2C quirk)
-                logger.info(f"  Still on login page, will retry...")
-                continue
-                
-        except Exception as e:
-            logger.error(f"Auto-login attempt {attempt} error: {e}")
-            if attempt >= max_attempts:
-                return False
-    
-    logger.warning("Auto-login: max attempts reached, still on login page")
-    return False
+
+    return perform_auto_login(
+        page,
+        is_authenticated_session=page_is_authenticated_session,
+        logger=logger,
+        max_attempts=3,
+        get_username=get_configured_rei_username,
+        get_password=get_configured_rei_password,
+        get_totp=get_configured_rei_totp,
+    )
 
 
 def input_listener(stop_event, trigger_daily_event, trigger_weekly_event):
@@ -1128,35 +1401,6 @@ def input_listener(stop_event, trigger_daily_event, trigger_weekly_event):
         except:
             break
 
-def setup_browser():
-    """Start Playwright and Browser."""
-    global playwright_instance, browser, context, page
-    
-    playwright_instance = sync_playwright().start()
-    
-    # Use persistent context to save login state
-    user_data_dir = os.path.expanduser("~/.rei-browser-profile")
-    if not os.path.exists(user_data_dir):
-        os.makedirs(user_data_dir)
-        
-    logger.info(f"Using browser profile: {user_data_dir}")
-    
-    # Launch with persistent context
-    context = playwright_instance.chromium.launch_persistent_context(
-        user_data_dir=user_data_dir,
-        headless=False,
-        viewport={"width": 1280, "height": 800},
-        accept_downloads=True,
-        args=["--disable-blink-features=AutomationControlled"]
-    )
-    
-    page = context.pages[0] if context.pages else context.new_page()
-
-    # Handle new tabs (popups) by adding them to context tracking if strictly needed,
-    # but our logic now handles new_page_info which is better.
-    # We remove the aggressive popup handler that forced closing.
-
-
 def main():
     global page
     
@@ -1171,6 +1415,12 @@ def main():
     run_bookings_hist = "--run-historical-bookings" in sys.argv
     run_bookings_maint = "--run-maintenance-bookings" in sys.argv
     run_bookings_future = "--run-future-window-bookings" in sys.argv
+
+    # Initialize state before any notification or watchdog logic so restart
+    # behavior can be deduped persistently across service restarts.
+    init_state_if_needed()
+    init_weekly_state_if_needed()
+    wait_while_paused()
     
     logger.info("=" * 60)
     logger.info("REI CLOUD AUTOMATION")
@@ -1191,28 +1441,15 @@ def main():
     page.goto(REI_CLOUD_URL, timeout=60000)
     
     # Check if already logged in (quick check by URL)
-    is_logged_in = False
-    try:
-        if "Dashboard" in page.url or "reimasterapps.com.au" in page.url and "b2clogin" not in page.url:
-            is_logged_in = True
-    except:
-        pass
+    is_logged_in = page_is_authenticated_session(page)
     
     # Try auto-login if not logged in and credentials are available
-    if not is_logged_in and REI_USERNAME and REI_PASSWORD:
-        logger.info("Credentials found in .env - attempting auto-login...")
+    if not is_logged_in and has_configured_rei_credentials():
+        logger.info("Credentials found via env or 1Password - attempting auto-login...")
         if auto_login():
-            is_logged_in = True
             # Give it a moment to fully load dashboard
             page.wait_for_timeout(3000)
-            # Verify we're on dashboard
-            try:
-                if "Dashboard" in page.url or ("reimasterapps.com.au" in page.url and "b2clogin" not in page.url):
-                    is_logged_in = True
-                else:
-                    is_logged_in = False
-            except:
-                is_logged_in = False
+            is_logged_in = page_is_authenticated_session(page)
     
     logger.info("")
     logger.info("=" * 60)
@@ -1222,13 +1459,15 @@ def main():
         logger.info("=" * 60)
         time.sleep(3)  # Brief pause before starting
     else:
-        if REI_USERNAME and REI_PASSWORD:
+        if has_configured_rei_credentials():
             logger.warning("Auto-login failed. Please log in manually.")
         logger.info("LOG IN to REI Master Apps in the browser window.")
         logger.info("When you're logged in and on the dashboard,")
         logger.info("come back here and press ENTER to continue...")
         logger.info("=" * 60)
         sys.stdin.readline()  # Wait for Enter
+        page.wait_for_timeout(3000)
+        is_logged_in = page_is_authenticated_session(page)
     
     logger.info("✓ Starting automation engine...")
     
@@ -1276,7 +1515,7 @@ def main():
     
     # Booking Data Extraction Maintenance
     logger.info("Scheduling booking data extraction maintenance daily at 14:00 Brisbane time")
-    schedule.every().day.at("14:00", "Australia/Brisbane").do(run_booking_maintenance)
+    schedule.every().day.at("14:00", "Australia/Brisbane").do(run_booking_maintenance_job)
     logger.info(
         "Scheduling rolling booking window snapshot daily at 14:15 Brisbane time (%s days back, %s days ahead)",
         BOOKING_FUTURE_WINDOW_DAYS_BACK,
@@ -1296,11 +1535,11 @@ def main():
     
     if run_bookings_hist:
         logger.info("Running historical booking extraction (--run-historical-bookings)...")
-        run_booking_historical()
+        run_booking_historical_job()
         
     if run_bookings_maint:
         logger.info("Running booking extraction maintenance (--run-maintenance-bookings)...")
-        run_booking_maintenance()
+        run_booking_maintenance_job()
 
     if run_bookings_future:
         logger.info("Running rolling booking window extraction (--run-future-window-bookings)...")
@@ -1316,11 +1555,12 @@ def main():
     logger.info("Automation engine started.")
 
     # Send startup notification
-    try: 
-        from api_email_sender import send_telegram_notification
-        send_telegram_notification("🚀 Automation is Live\nSystem initialized and ready.")
-    except Exception as e:
-        logger.warning(f"Failed to send startup notification: {e}")
+    if should_send_startup_notification():
+        try:
+            from api_email_sender import send_telegram_notification
+            send_telegram_notification("🚀 Automation is Live\nSystem initialized and ready.")
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification: {e}")
 
     # Setup background thread to listen for manual trigger commands
     stop_event = threading.Event()
@@ -1328,20 +1568,31 @@ def main():
     trigger_weekly_event = threading.Event()
     input_thread = threading.Thread(target=input_listener, args=(stop_event, trigger_daily_event, trigger_weekly_event), daemon=True)
     input_thread.start()
-
-    # Initialize state if needed (sets next_expected_run)
-    init_state_if_needed()
-    init_weekly_state_if_needed()
-    
-    alert_sent_for_current_deadline = False
-    current_deadline_str = None  # Track which deadline we've alerted for
-
-    weekly_alert_sent_for_current_deadline = False
-    current_weekly_deadline_str = None  # Track which weekly deadline we've alerted for
+    pause_logged = False
 
     # Main Loop
     try:
         while True:
+            if is_automation_paused():
+                if not pause_logged:
+                    logger.warning(
+                        "Automation pause flag detected at %s. Scheduled work and alerts are paused.",
+                        PAUSE_FILE,
+                    )
+                    pause_logged = True
+
+                if trigger_daily_event.is_set() or trigger_weekly_event.is_set():
+                    trigger_daily_event.clear()
+                    trigger_weekly_event.clear()
+                    logger.info("Cleared queued manual triggers while pause flag is active.")
+
+                time.sleep(5)
+                continue
+
+            if pause_logged:
+                logger.info("Automation pause flag cleared. Scheduled work resumed.")
+                pause_logged = False
+
             schedule.run_pending()
             
             # Watchdog: Check for missed run using deadline-based logic
@@ -1349,63 +1600,39 @@ def main():
             is_past, next_expected_dt, last_success_dt = is_past_deadline()
             
             if is_past and next_expected_dt:
-                deadline_str = next_expected_dt.isoformat()
-                
-                # Reset alert flag when deadline changes (new day)
-                if deadline_str != current_deadline_str:
-                    current_deadline_str = deadline_str
-                    alert_sent_for_current_deadline = False
-                
-                # Check if we should alert
-                if not alert_sent_for_current_deadline:
-                    # No successful run before this deadline?
-                    missed_run = (last_success_dt is None) or (last_success_dt < next_expected_dt)
-                    
-                    if missed_run:
-                        alert_sent_for_current_deadline = True
+                missed_run = (last_success_dt is None) or (last_success_dt < next_expected_dt)
+
+                if missed_run:
+                    token = missed_daily_notification_token(next_expected_dt)
+                    if record_notification_if_new(MISSED_DAILY_NOTIFICATION_CATEGORY, token):
                         now = datetime.now()
                         msg = f"MISSED SCHEDULED RUN. Expected by: {next_expected_dt.strftime('%Y-%m-%d %H:%M')}. Current time: {now.strftime('%H:%M')}. Please check server."
                         logger.warning(msg)
-                        
+
                         try:
                             from api_email_sender import send_failure_alert
                             send_failure_alert(msg)
                         except Exception as ex:
                             logger.error(f"Failed to send missed run alert: {ex}")
-                    else:
-                        # We already have a successful run for this deadline, just set flag
-                        alert_sent_for_current_deadline = True
 
             # Weekly Watchdog: Check for missed weekly run using deadline-based logic
             is_past_weekly, next_expected_weekly_dt, last_weekly_success_dt = is_past_weekly_deadline()
 
             if is_past_weekly and next_expected_weekly_dt:
-                weekly_deadline_str = next_expected_weekly_dt.isoformat()
-                
-                # Reset alert flag when deadline changes (new week)
-                if weekly_deadline_str != current_weekly_deadline_str:
-                    current_weekly_deadline_str = weekly_deadline_str
-                    weekly_alert_sent_for_current_deadline = False
-                
-                # Check if we should alert
-                if not weekly_alert_sent_for_current_deadline:
-                    # No successful run before this deadline?
-                    missed_weekly_run = (last_weekly_success_dt is None) or (last_weekly_success_dt < next_expected_weekly_dt)
-                    
-                    if missed_weekly_run:
-                        weekly_alert_sent_for_current_deadline = True
+                missed_weekly_run = (last_weekly_success_dt is None) or (last_weekly_success_dt < next_expected_weekly_dt)
+
+                if missed_weekly_run:
+                    token = missed_weekly_notification_token(next_expected_weekly_dt)
+                    if record_notification_if_new(MISSED_WEEKLY_NOTIFICATION_CATEGORY, token):
                         now = datetime.now()
                         msg = f"MISSED WEEKLY SCHEDULED RUN. Expected by: {next_expected_weekly_dt.strftime('%Y-%m-%d %H:%M')} (Saturday). Current time: {now.strftime('%Y-%m-%d %H:%M')}. Please check server."
                         logger.warning(msg)
-                        
+
                         try:
                             from api_email_sender import send_failure_alert
                             send_failure_alert(msg)
                         except Exception as ex:
                             logger.error(f"Failed to send missed weekly run alert: {ex}")
-                    else:
-                        # We already have a successful run for this deadline, just set flag
-                        weekly_alert_sent_for_current_deadline = True
 
             # Handle manual daily trigger
             if trigger_daily_event.is_set():

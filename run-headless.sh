@@ -14,8 +14,9 @@
 # NOTE: Requires xvfb to be installed:
 #   sudo apt install xvfb
 #
-# NOTE: REI_USERNAME and REI_PASSWORD must be set in .env
-#       for auto-login to work (no manual login in headless mode!)
+# NOTE: Auto-login can use either plain REI_* values in .env or
+#       1Password config (OP_SERVICE_ACCOUNT_TOKEN plus REI_1PASSWORD_* or op:// refs).
+#       Manual login is not available in headless mode.
 # ============================================================
 
 echo "============================================================"
@@ -30,14 +31,14 @@ if ! command -v xvfb-run &> /dev/null; then
     exit 1
 fi
 
-# Check for credentials in .env
-if ! grep -q "REI_USERNAME" .env 2>/dev/null || ! grep -q "REI_PASSWORD" .env 2>/dev/null; then
-    echo "WARNING: REI_USERNAME and/or REI_PASSWORD not found in .env"
-    echo "Auto-login will not work without credentials!"
+# Check for auth config in .env
+if ! grep -Eq "^(REI_USERNAME|REI_PASSWORD|OP_SERVICE_ACCOUNT_TOKEN|REI_1PASSWORD_ITEM|REI_1PASSWORD_VAULT)=" .env 2>/dev/null; then
+    echo "WARNING: No REI auth config or 1Password config found in .env"
+    echo "Headless auto-login will not work without credentials!"
     echo ""
     read -p "Continue anyway? (y/N): " response
     if [[ ! "$response" =~ ^[Yy]$ ]]; then
-        echo "Aborted. Add credentials to .env first."
+        echo "Aborted. Add REI credentials or 1Password config to .env first."
         exit 1
     fi
 fi
