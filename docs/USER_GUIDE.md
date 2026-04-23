@@ -143,7 +143,7 @@ Configured in your `.env` file:
 | `EMAIL_CC` | CC recipients (managers) | manager@email.com |
 | `EMAIL_PROVIDER` | Report email sender | resend |
 | `RESEND_API_KEY` | Resend API key for report emails | re_xxx |
-| `RESEND_FROM` | Verified Resend sender | Paradise Stayz Updates <reports@updates.paradisestayz.com.au> |
+| `RESEND_FROM` | Verified Resend sender | `Paradise Stayz Updates <reports@updates.paradisestayz.com.au>` |
 | `SMS_SENDER_NOTIFY` | Your phone for confirmations | +61412345678 |
 | `ESCALATION_PHONE` | Emergency alerts if it fails | +61412345678 |
 | `ALERT_PROVIDERS` | Failure alert channels | brrr,comms |

@@ -189,6 +189,7 @@ class BrrrAlertClient:
         payload: dict[str, Any] = {
             "title": title_with_prefix,
             "message": body,
+            "severity": severity,
         }
         if self.config.thread_id:
             payload["thread_id"] = self.config.thread_id

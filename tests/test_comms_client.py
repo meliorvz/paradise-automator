@@ -129,6 +129,7 @@ class CommsClientTests(unittest.TestCase):
         payload = fake_session.posts[0]["json"]
         self.assertEqual(payload["title"], "[Paradise] REI Automation Failed")
         self.assertEqual(payload["message"], "Daily run missed deadline")
+        self.assertEqual(payload["severity"], "error")
         self.assertEqual(payload["thread_id"], "paradise-automator")
         self.assertEqual(payload["interruption_level"], "time-sensitive")
         self.assertTrue(fake_session.closed)

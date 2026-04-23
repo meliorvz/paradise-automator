@@ -62,7 +62,11 @@ def parse_csv_list(value: str) -> list[str]:
 
 
 def selected_alert_providers() -> list[str]:
-    providers = [p.lower() for p in parse_csv_list(os.getenv("ALERT_PROVIDERS", ALERT_PROVIDERS) or DEFAULT_ALERT_PROVIDERS)]
+    configured_providers = os.getenv("ALERT_PROVIDERS")
+    providers = [
+        p.lower()
+        for p in parse_csv_list(configured_providers or DEFAULT_ALERT_PROVIDERS)
+    ]
     return providers or parse_csv_list(DEFAULT_ALERT_PROVIDERS)
 
 
@@ -71,7 +75,7 @@ def send_email_via_comms_centre(
     body: str,
     html_body: str,
     attachment_paths: list[str],
-    to_emails: list[str] = None
+    to_emails: list[str] | None = None
 ) -> bool:
     """
     Send an email with multiple base64-encoded attachments via Comms Centre API.
@@ -168,7 +172,7 @@ def send_email_via_resend(
     body: str,
     html_body: str,
     attachment_paths: list[str],
-    to_emails: list[str] = None
+    to_emails: list[str] | None = None
 ) -> bool:
     """
     Send an email with multiple base64-encoded attachments via Resend.
@@ -226,9 +230,9 @@ def send_email_message(
     body: str,
     html_body: str,
     attachment_paths: list[str],
-    to_emails: list[str] = None
+    to_emails: list[str] | None = None
 ) -> bool:
-    provider = (os.getenv("EMAIL_PROVIDER", EMAIL_PROVIDER) or DEFAULT_EMAIL_PROVIDER).strip().lower()
+    provider = (os.getenv("EMAIL_PROVIDER") or DEFAULT_EMAIL_PROVIDER).strip().lower()
     if provider == "resend":
         if send_email_via_resend(subject, body, html_body, attachment_paths, to_emails):
             return True
