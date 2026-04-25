@@ -40,6 +40,26 @@ class ApiEmailSenderProviderTests(unittest.TestCase):
         with patch.dict(api_email_sender.os.environ, {}, clear=True):
             self.assertEqual(api_email_sender.selected_alert_providers(), ["brrr", "comms"])
 
+    def test_send_ops_notification_via_ntfy_uses_info_severity(self) -> None:
+        mock_client = unittest.mock.Mock()
+        mock_client.send_alert.return_value = unittest.mock.Mock(
+            success=True,
+            error=None,
+            status_code=200,
+            response_text="",
+        )
+
+        with patch.object(api_email_sender, "build_ntfy_alert_client", return_value=mock_client):
+            result = api_email_sender.send_ops_notification_via_ntfy("Automation is Live", "System initialized and ready.")
+
+        self.assertTrue(result)
+        mock_client.send_alert.assert_called_once_with(
+            title="Automation is Live",
+            body="System initialized and ready.",
+            severity="info",
+            timeout=30,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from comms_client import (
     DEFAULT_RESEND_API_URL,
     DEFAULT_RESEND_FROM,
     build_brrr_alert_client,
+    build_ntfy_alert_client,
     build_resend_email_client,
 )
 
@@ -604,13 +605,13 @@ See the email content for the detailed list.
             sms_body = f"{report_type} Cleaning {date_str}: {summary_arr}, {summary_dep}. Check email."
         sms_success = send_sms_notification(SMS_SENDER_NOTIFY, sms_body)
     
-    # === STEP 3: Telegram Delivery Report ===
-    telegram_report = f"📊 {report_type} Report Delivery for {date_str}:\n"
-    telegram_report += f"• Email: {'✅ Sent' if email_success else '❌ FAILED'}\n"
+    # === STEP 3: Operational Delivery Report via ntfy ===
+    ops_report = f"Date: {date_str}\n"
+    ops_report += f"Email: {'✅ Sent' if email_success else '❌ FAILED'}\n"
     if SMS_SENDER_NOTIFY:
-        telegram_report += f"• SMS to Sender: {'✅ Sent' if sms_success else '❌ FAILED'}\n"
-    telegram_report += f"\nSummary: {summary_arr}, {summary_dep}"
-    send_telegram_notification(telegram_report)
+        ops_report += f"SMS to Sender: {'✅ Sent' if sms_success else '❌ FAILED'}\n"
+    ops_report += f"\nSummary: {summary_arr}, {summary_dep}"
+    send_ops_notification_via_ntfy(f"{report_type} Report Delivery", ops_report)
     
     # === STEP 4: Escalation if email failed ===
     if not email_success:
@@ -689,6 +690,26 @@ def send_telegram_notification(message: str) -> bool:
     except Exception as e:
         logger.error(f"Telegram error: {e}")
         return False
+
+
+def send_ops_notification_via_ntfy(title: str, message: str) -> bool:
+    """Send a non-critical operational notification via ntfy."""
+    client = build_ntfy_alert_client()
+    result = client.send_alert(
+        title=title,
+        body=message,
+        severity="info",
+        timeout=30,
+    )
+    if result.error:
+        logger.error(f"ntfy ops notification failed: {result.error}")
+        return False
+    if result.success:
+        logger.info("ntfy ops notification sent")
+        return True
+
+    logger.error(f"ntfy ops notification failed: {result.status_code} - {result.response_text}")
+    return False
 
 
 def send_failure_alert_via_brrr(error_message: str) -> bool:
