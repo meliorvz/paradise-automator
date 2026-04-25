@@ -123,7 +123,10 @@ WEEKLY_SCHEDULED_MINUTE = 0
 WEEKLY_GRACE_PERIOD_MINUTES = 10
 BOOKING_FUTURE_WINDOW_DAYS_BACK = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_BACK", "30"))
 BOOKING_FUTURE_WINDOW_DAYS_AHEAD = int(os.getenv("BOOKING_FUTURE_WINDOW_DAYS_AHEAD", "90"))
-BOOKING_FUTURE_WINDOW_OUTPUT = os.getenv("BOOKING_FUTURE_WINDOW_OUTPUT", "all_bookings_future_window.csv")
+BOOKING_FUTURE_WINDOW_OUTPUT = os.getenv(
+    "BOOKING_FUTURE_WINDOW_OUTPUT",
+    str(DOWNLOAD_DIR.parent / "all_bookings_future_window.csv"),
+)
 APP_DIR = Path(__file__).resolve().parent
 BOOKING_EXTRACTOR_SCRIPT = APP_DIR / "booking_data_extractor.py"
 REPORT_LIST_URL = "https://app.reimasterapps.com.au/report/reportlist?reicid=758"
@@ -1258,22 +1261,22 @@ def run_weekly_report():
 
 def run_daily_status_check():
     """
-    Daily heartbeat notification via Telegram at 9 PM.
+    Daily heartbeat notification via ntfy at 9 PM.
     """
     logger.info("Running daily status check...")
     try:
-        from api_email_sender import send_telegram_notification
+        from api_email_sender import send_ops_notification_via_ntfy
         from datetime import datetime
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        msg = f"✅ Automation Status Check\nTime: {now_str}\nStatus: Running correctly"
+        msg = f"Time: {now_str}\nStatus: Running correctly"
         
-        if send_telegram_notification(msg):
-            logger.info("✓ Daily status notification sent via Telegram.")
+        if send_ops_notification_via_ntfy("Automation Status Check", msg):
+            logger.info("✓ Daily status notification sent via ntfy.")
         else:
             logger.warning("Failed to send daily status notification.")
             
     except ImportError:
-        logger.error("Could not import send_telegram_notification from api_email_sender")
+        logger.error("Could not import send_ops_notification_via_ntfy from api_email_sender")
     except Exception as e:
         logger.error(f"Error sending daily status: {e}")
 
@@ -1557,8 +1560,8 @@ def main():
     # Send startup notification
     if should_send_startup_notification():
         try:
-            from api_email_sender import send_telegram_notification
-            send_telegram_notification("🚀 Automation is Live\nSystem initialized and ready.")
+            from api_email_sender import send_ops_notification_via_ntfy
+            send_ops_notification_via_ntfy("Automation is Live", "System initialized and ready.")
         except Exception as e:
             logger.warning(f"Failed to send startup notification: {e}")
 

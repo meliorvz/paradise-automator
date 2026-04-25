@@ -2,6 +2,7 @@
 """Shared REI login helpers, including authenticator-app verification handling."""
 
 import logging
+import time
 
 from rei_credentials import get_rei_login_credentials, get_rei_totp
 
@@ -54,6 +55,9 @@ MFA_TEXT_HINTS = (
     "totp",
     "otp",
 )
+MFA_DUPLICATE_CODE_TEXT = "duplicate verification code"
+MFA_CODE_REFRESH_TIMEOUT_SECONDS = 35
+MFA_CODE_REFRESH_POLL_SECONDS = 1
 
 
 def _get_logger(logger=None):
@@ -142,6 +146,28 @@ def page_is_login_page(target_page):
     return "member login" in content or ("password" in content and "email address" in content)
 
 
+def wait_for_new_totp_code(
+    previous_code,
+    *,
+    logger=None,
+    get_totp=None,
+    timeout_seconds=MFA_CODE_REFRESH_TIMEOUT_SECONDS,
+    poll_seconds=MFA_CODE_REFRESH_POLL_SECONDS,
+):
+    log = _get_logger(logger)
+    get_totp = get_totp or (lambda: get_rei_totp(logger=log))
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        next_code = get_totp()
+        if next_code and next_code != previous_code:
+            return next_code
+        time.sleep(poll_seconds)
+
+    log.warning("Timed out waiting for a fresh authenticator code.")
+    return ""
+
+
 def complete_totp_verification(target_page, logger=None, get_totp=None):
     log = _get_logger(logger)
     get_totp = get_totp or (lambda: get_rei_totp(logger=log))
@@ -152,7 +178,7 @@ def complete_totp_verification(target_page, logger=None, get_totp=None):
             "Authenticator app verification is required, but no TOTP source is configured. "
             "Set REI_TOTP or configure 1Password."
         )
-        return False
+        return ""
 
     input_selector = _first_visible_selector(
         target_page,
@@ -160,7 +186,7 @@ def complete_totp_verification(target_page, logger=None, get_totp=None):
     )
     if not input_selector:
         log.error("Authenticator app verification is required, but no verification code field was found.")
-        return False
+        return ""
 
     log.info("  -> Filling authenticator app verification code...")
     try:
@@ -168,24 +194,24 @@ def complete_totp_verification(target_page, logger=None, get_totp=None):
         target_page.wait_for_timeout(300)
     except Exception as exc:
         log.error("Could not fill verification code field: %s", exc)
-        return False
+        return ""
 
     submit_selector = _first_visible_selector(target_page, MFA_SUBMIT_SELECTORS)
     if submit_selector:
         log.info("  -> Submitting authenticator app verification...")
         try:
             target_page.locator(submit_selector).first.click()
-            return True
+            return verification_code
         except Exception as exc:
             log.error("Could not submit authenticator app verification: %s", exc)
-            return False
+            return ""
 
     try:
         target_page.locator(input_selector).first.press("Enter")
-        return True
+        return verification_code
     except Exception as exc:
         log.error("Could not submit verification code with Enter: %s", exc)
-        return False
+        return ""
 
 
 def auto_login(
@@ -216,6 +242,7 @@ def auto_login(
 
     for attempt in range(1, max_attempts + 1):
         try:
+            submitted_code = ""
             log.info("  Login attempt %s/%s...", attempt, max_attempts)
             target_page.wait_for_timeout(3000)
 
@@ -225,7 +252,8 @@ def auto_login(
 
             if page_requires_totp(target_page):
                 log.info("  -> Authenticator app verification required...")
-                if not complete_totp_verification(target_page, logger=log, get_totp=get_totp):
+                submitted_code = complete_totp_verification(target_page, logger=log, get_totp=get_totp)
+                if not submitted_code:
                     return False
                 log.info("  -> Waiting for verification response...")
                 target_page.wait_for_timeout(8000)
@@ -235,10 +263,15 @@ def auto_login(
 
                 error_text = get_visible_auth_error_text(target_page)
                 if error_text:
+                    if MFA_DUPLICATE_CODE_TEXT in error_text.lower() and attempt < max_attempts:
+                        log.warning("Verification code was reused. Waiting for a fresh authenticator code before retrying...")
+                        wait_for_new_totp_code(submitted_code, logger=log, get_totp=get_totp)
+                        continue
                     log.error("Verification failed - error shown: %s", error_text)
                     return False
 
                 if attempt < max_attempts:
+                    wait_for_new_totp_code(submitted_code, logger=log, get_totp=get_totp)
                     log.info("  Verification state not yet confirmed, will retry...")
                     continue
                 return False
@@ -286,7 +319,8 @@ def auto_login(
 
             if page_requires_totp(target_page):
                 log.info("  -> Authenticator app verification required...")
-                if not complete_totp_verification(target_page, logger=log, get_totp=get_totp):
+                submitted_code = complete_totp_verification(target_page, logger=log, get_totp=get_totp)
+                if not submitted_code:
                     return False
                 log.info("  -> Waiting for verification response...")
                 target_page.wait_for_timeout(8000)
@@ -297,11 +331,16 @@ def auto_login(
 
             error_text = get_visible_auth_error_text(target_page)
             if error_text:
+                if MFA_DUPLICATE_CODE_TEXT in error_text.lower() and attempt < max_attempts:
+                    log.warning("Verification code was reused. Waiting for a fresh authenticator code before retrying...")
+                    wait_for_new_totp_code(submitted_code, logger=log, get_totp=get_totp)
+                    continue
                 log.error("Login failed - error shown: %s", error_text)
                 return False
 
             if page_requires_totp(target_page):
                 if attempt < max_attempts:
+                    wait_for_new_totp_code(submitted_code, logger=log, get_totp=get_totp)
                     log.info("  Verification state not yet confirmed, will retry...")
                     continue
                 return False
